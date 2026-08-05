@@ -1,0 +1,47 @@
+name: Tag release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # The tag mirrors the published image tag, <upstream version>-<BUILD>, with
+      # a v prefix. Both halves come from build.env and the base image, never from
+      # git history -- so this workflow records what was published rather than
+      # computing it.
+      - name: Tag if this build is new
+        run: |
+          set -euo pipefail
+          . ./build.env
+          docker pull -q "$BASE"
+          upstream="$(docker run --rm --entrypoint node "$BASE" \
+            -p "require('/home/node/signalk/node_modules/signalk-server/package.json').version")"
+          tag="v${upstream}-${BUILD}"
+
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Signal K server image ${upstream}-${BUILD}
+
+          Base:  ${BASE}
+          Image: ghcr.io/${{ github.repository }}:${upstream}-${BUILD}
+
+          Plugin versions are resolved at build time and not pinned, matching
+          upstream. Ask the image what it contains: ./run plugin-versions <tag>"
+          git push origin "$tag"
+          echo "Created ${tag}"
