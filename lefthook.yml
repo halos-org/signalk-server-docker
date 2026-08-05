@@ -1,0 +1,16 @@
+# Lefthook configuration for signalk-server-docker
+# Install with: ./run install-hooks
+
+pre-commit:
+  parallel: true
+  commands:
+    shellcheck:
+      glob: "*.sh"
+      run: shellcheck {staged_files}
+      fail_text: "shellcheck found issues. Fix the warnings above."
+
+    manifest-lf:
+      glob: "plugins.list"
+      # The manifest is parsed line by line; a CR would make every entry "name\r".
+      run: '! grep -qU $'"'"'\r'"'"' plugins.list'
+      fail_text: "plugins.list contains CRLF line endings. It must be LF only."
