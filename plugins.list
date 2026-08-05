@@ -1,0 +1,36 @@
+# Curated Signal K plugins and webapps for HaLOS Marine.
+#
+# provision.sh installs any entry not already present in ~/.signalk/node_modules;
+# thereafter the Signal K app store updates each one individually (no deb rebuild).
+
+# Webapps (UI)
+@signalk/freeboard-sk
+@halos-org/skip
+@signalk/charts-plugin
+
+# Navigation / course
+@signalk/course-provider
+
+# NMEA I/O
+@signalk/signalk-to-nmea0183
+signalk-to-nmea2000
+signalk-n2kais-to-nmea0183
+@signalk/udp-nmea-plugin
+@signalk/set-system-time
+
+# Derived / performance / vessel state
+signalk-derived-data
+signalk-polar-performance-plugin
+@meri-imperiumi/signalk-autostate
+
+# Safety
+signalk-anchoralarm-plugin
+
+# Sensors / misc
+signalk-flags
+
+# Logging (configured with the InfluxDB token by prestart)
+signalk-to-influxdb2
+
+# Automation
+@signalk/signalk-node-red
