@@ -49,6 +49,7 @@ filesystem-walk probe:
 | Mutation | Expected | Observed |
 |---|---|---|
 | Hoisted install, whole staging tree copied into the server root | resolution assertion fails | **35** displacements reported, incl. `ws:8.21.0->7.5.13`, `bcryptjs:2.4.3->3.0.3`, `JSONStream:1.3.5->0.7.4` |
+| Displace a package with a restrictive `exports` map (`helmet`) into the server root | resolution assertion fails | `helmet:8.2.0->0.0.1-shadowed` — the old `require.resolve` probe threw `ERR_PACKAGE_PATH_NOT_EXPORTED` here and dropped it silently |
 | Copy to top-level `node_modules` instead of the server root | plugin assertions fail | 17/17 reported not loaded |
 | `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 16/17 not loaded, admin UI **500** |
 | `public/` deleted from a webapp package | webapp assertion fails | webapp reported as not serving |
@@ -57,6 +58,10 @@ filesystem-walk probe:
 | Unmutated control | passes | PASS |
 
 ### Lessons this table has already paid for
+
+**The `exports`-map row is not decoration.** It is the specific case that
+defeated the previous probe, so it is the row that proves the current one. If
+the probe is ever changed, run this row first.
 
 **The probe strategy matters as much as the assertion.** The first attempt at
 the resolution check used `require.resolve('<pkg>/package.json')`, which throws
