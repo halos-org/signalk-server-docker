@@ -20,6 +20,9 @@ readonly IMAGE_NAME="signalk-server-halos"
 
 # shellcheck source=build.env
 source ./build.env
+# Exported: tests/verify-image.sh gates its base-image comparisons on BASE, and a
+# sourced assignment does not reach a child process -- both would silently SKIP.
+export BASE
 
 # The version half of our tag comes from the base image's own installed
 # signalk-server, not from parsing BASE. Whatever upstream calls its tags is

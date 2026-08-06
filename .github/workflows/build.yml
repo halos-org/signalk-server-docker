@@ -10,7 +10,8 @@ on:
       - Dockerfile
       - plugins.list
       - build.env
-      - tests/**
+      - tests/*.sh
+      - run
       - .github/workflows/build.yml
   pull_request:
     branches: [main]

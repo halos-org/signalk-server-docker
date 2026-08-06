@@ -43,11 +43,12 @@ plugins listing.
 
 **Re-run this whenever the script's assertions change, or whenever anything the
 harness reads changes.** A check never observed failing is not evidence that it
-can fail. Last run 2026-08-06, against the nested-install design:
+can fail. Last run 2026-08-06, against the nested-install design with the
+filesystem-walk probe:
 
 | Mutation | Expected | Observed |
 |---|---|---|
-| Hoisted install, whole staging tree copied into the server root | dependency-displacement assertion fails | `ws:8.21.0->7.5.13 uuid:8.3.2->14.0.1 bcryptjs:2.4.3->3.0.3 body-parser` **and** 2 uncurated plugins reported |
+| Hoisted install, whole staging tree copied into the server root | resolution assertion fails | **35** displacements reported, incl. `ws:8.21.0->7.5.13`, `bcryptjs:2.4.3->3.0.3`, `JSONStream:1.3.5->0.7.4` |
 | Copy to top-level `node_modules` instead of the server root | plugin assertions fail | 17/17 reported not loaded |
 | `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 16/17 not loaded, admin UI **500** |
 | `public/` deleted from a webapp package | webapp assertion fails | webapp reported as not serving |
@@ -56,6 +57,15 @@ can fail. Last run 2026-08-06, against the nested-install design:
 | Unmutated control | passes | PASS |
 
 ### Lessons this table has already paid for
+
+**The probe strategy matters as much as the assertion.** The first attempt at
+the resolution check used `require.resolve('<pkg>/package.json')`, which throws
+`ERR_PACKAGE_PATH_NOT_EXPORTED` for any package with a restrictive `exports`
+map — 13 of signalk-server's 61 declared dependencies, `bcryptjs` among them.
+Those were silently dropped, and the comparison ignored packages that had
+*disappeared* entirely. It reported **5** of 35 real displacements and passed an
+image that had lost every security header. The current probe walks the
+filesystem across the whole closure and reports 35.
 
 **The first version of this harness passed the hoisted build.** Every plugin
 loaded, the admin UI served, and 35 of signalk-server's own dependencies had

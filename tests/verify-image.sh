@@ -30,6 +30,9 @@ bad() {
   fail=1
 }
 die() {
+  # fail=1 so the EXIT trap dumps container logs: the die paths (auth failure, a
+  # 500 from a listing) are exactly the ones where the logs are the diagnosis.
+  fail=1
   printf 'verify-image: %s\n' "$1" >&2
   exit 1
 }
@@ -127,16 +130,20 @@ parse='import sys,json
 for m in json.load(sys.stdin):
     n = m.get("packageName") or m.get("name","")
     if n: print(n + "\t" + str(m.get("version","")))'
-LOADED="$( { listing plugins | python3 -c "$parse"; listing webapps | python3 -c "$parse"; } | sort -u )" ||
-  exit 1
-WEBAPPS="$(listing webapps | python3 -c "$parse" | cut -f1)"
+# Fetched separately with their own status checks: `die` inside a pipeline exits
+# only that subshell, so a 500 on /skServer/plugins would leave the run continuing
+# on webapps-only data and report every plugin as "NOT loaded".
+plugins_raw="$(listing plugins)" || exit 1
+webapps_raw="$(listing webapps)" || exit 1
+LOADED="$( { printf '%s' "$plugins_raw" | python3 -c "$parse"; printf '%s' "$webapps_raw" | python3 -c "$parse"; } | sort -u )"
+WEBAPPS="$(printf '%s' "$webapps_raw" | python3 -c "$parse" | cut -f1)"
 
 # --- every manifest entry loads, at the version baked into the image ----------
 count=0
 while IFS= read -r pkg; do
   [ -n "$pkg" ] || continue
   count=$((count + 1))
-  served="$(grep -F "$(printf '%s\t' "$pkg")" <<<"$LOADED" | head -1 | cut -f2)"
+  served="$(awk -F'\t' -v p="$pkg" '$1==p{print $2; exit}' <<<"$LOADED")"
   if [ -z "$served" ]; then
     bad "NOT loaded: $pkg"
     continue
@@ -157,12 +164,14 @@ done < <(manifest_entries)
 echo "  (${count} manifest entries checked)"
 
 # --- webapps actually serve their payload ------------------------------------
+wa_checked=0
 # Presence in /skServer/webapps is a package.json keyword scan, not evidence that
 # anything is served: deleting only public/ leaves the listing intact and the URL
 # 404ing. These are the UIs users open.
 while IFS= read -r pkg; do
   [ -n "$pkg" ] || continue
   grep -qxF "$pkg" <<<"$WEBAPPS" || continue
+  wa_checked=$((wa_checked + 1))
   status="$(curl -s --max-time 15 -o "$WORK/wa.out" -w '%{http_code}' "http://localhost:${PORT}/${pkg}/")"
   if [ "$status" = "200" ] && [ -s "$WORK/wa.out" ]; then
     ok "webapp serves: $pkg"
@@ -170,6 +179,7 @@ while IFS= read -r pkg; do
     bad "webapp does not serve: $pkg (HTTP ${status})"
   fi
 done < <(manifest_entries)
+[ "$wa_checked" -gt 0 ] || bad "no manifest webapp was checked -- the payload assertion asserted nothing"
 
 # --- the base image's own admin UI still serves ------------------------------
 # Not a manifest entry, so the webapp loop above does not cover it -- and it is
@@ -205,7 +215,7 @@ for(const e of fs.readdirSync(p)) if(e.startsWith("@")) for(const s of fs.readdi
     ok "no uncurated packages loaded"
   fi
 else
-  printf '  SKIP uncurated-package check (set BASE to enable)\n'
+  die "BASE is unset -- cannot enumerate the base image's packages"
 fi
 
 # --- the bake did not displace the base image's own dependency resolution -----
@@ -214,31 +224,51 @@ fi
 # level, and silently substituted 35 of them -- including a ws major downgrade.
 # Names and load-success both looked perfect.
 if [ -n "${BASE:-}" ]; then
-  probe='const SR="/home/node/signalk/node_modules/signalk-server";
-const out={};
-for (const d of Object.keys(require(SR+"/package.json").dependencies||{})) {
-  try { out[d]=require(require.resolve(d+"/package.json",{paths:[SR+"/dist"]})).version; } catch {}
-}
+  # Walk the filesystem rather than require.resolve. An earlier probe used
+  # require.resolve('<pkg>/package.json'), which throws ERR_PACKAGE_PATH_NOT_EXPORTED
+  # for any package with a restrictive exports map -- 13 of signalk-server's 61
+  # declared dependencies, including bcryptjs, @signalk/server-api and helmet. Those
+  # were silently dropped, so the check caught 5 of 35 real displacements and passed
+  # an image that had lost every security header.
+  #
+  # This resolves the way Node does for the server's own code (server root first,
+  # then top level) across the WHOLE closure, not just declared dependencies, and
+  # reports a package that disappeared as loudly as one that changed version.
+  probe='const fs=require("fs"),path=require("path");
+const SR="/home/node/signalk/node_modules/signalk-server/node_modules";
+const TL="/home/node/signalk/node_modules";
+function scan(dir){const o={};let e=[];try{e=fs.readdirSync(dir)}catch{return o}
+  for(const n of e){ if(n.startsWith(".")) continue;
+    const names = n.startsWith("@") ? (()=>{try{return fs.readdirSync(path.join(dir,n)).map(s=>n+"/"+s)}catch{return[]}})() : [n];
+    for(const m of names){ try{ o[m]=JSON.parse(fs.readFileSync(path.join(dir,m,"package.json"),"utf8")).version||"?" }catch{} } }
+  return o;}
+const sr=scan(SR), tl=scan(TL);
+// What signalk-server`s own code resolves: server root shadows top level.
+const out={}; for(const k of Object.keys(tl)) out[k]=tl[k];
+for(const k of Object.keys(sr)) out[k]=sr[k];
 console.log(JSON.stringify(out));'
-  docker run --rm --entrypoint node "$BASE" -e "$probe" >"$WORK/base.json" 2>/dev/null
-  docker run --rm --entrypoint node "$IMAGE" -e "$probe" >"$WORK/img.json" 2>/dev/null
-  if [ -s "$WORK/base.json" ] && [ -s "$WORK/img.json" ]; then
-    drift="$(python3 - "$WORK/base.json" "$WORK/img.json" <<'PY'
+  docker run --rm --entrypoint node "$BASE"  -e "$probe" >"$WORK/base.json" 2>/dev/null
+  docker run --rm --entrypoint node "$IMAGE" -e "$probe" >"$WORK/img.json"  2>/dev/null
+  drift="$(python3 - "$WORK/base.json" "$WORK/img.json" <<'PY_CMP'
 import json,sys
-b=json.load(open(sys.argv[1])); i=json.load(open(sys.argv[2]))
-print(" ".join(f"{k}:{b[k]}->{i[k]}" for k in sorted(b) if k in i and b[k]!=i[k]))
-PY
-)"
-    if [ -n "$drift" ]; then
-      bad "bake displaced the server's own dependencies: ${drift}"
-    else
-      ok "server's declared dependencies resolve as in the base image"
-    fi
-  else
-    bad "could not compare dependency resolution against ${BASE}"
-  fi
+try:
+    b=json.load(open(sys.argv[1])); i=json.load(open(sys.argv[2]))
+except Exception as e:
+    print("COMPARATOR-FAILED:", e); sys.exit(0)
+if len(b) < 100:
+    print(f"COMPARATOR-FAILED: base probe returned only {len(b)} packages"); sys.exit(0)
+out=[f"{k}:{b[k]}->{i[k]}" for k in sorted(b) if k in i and b[k]!=i[k]]
+out+= [f"{k}:{b[k]}->GONE" for k in sorted(b) if k not in i]
+print(" ".join(out))
+PY_CMP
+)" || drift="COMPARATOR-FAILED: python exited non-zero"
+  case "$drift" in
+    "") ok "server's resolution matches the base image across the whole closure" ;;
+    COMPARATOR-FAILED*) bad "dependency comparison did not run: ${drift}" ;;
+    *) bad "bake changed the server's resolution: ${drift}" ;;
+  esac
 else
-  printf '  SKIP base-image dependency comparison (set BASE to enable)\n'
+  die "BASE is unset -- the uncurated-package and dependency-resolution checks cannot run. Use ./run verify, or set BASE explicitly."
 fi
 
 echo

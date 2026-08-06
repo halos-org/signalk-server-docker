@@ -39,32 +39,50 @@ COPY --chown=node:node plugins.list .
 RUN npm init -y >/dev/null \
  && sed -e 's/^[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' plugins.list | tr -d '\r' \
       | xargs npm install --install-strategy=nested --ignore-scripts --no-audit --no-fund \
- && rm plugins.list package.json package-lock.json
+ && rm package.json package-lock.json
+
+# Assemble the payload HERE, in the throwaway stage. Doing it in the final stage
+# would COPY the whole 913-package staging tree into a layer first; deleting it
+# afterwards does not reclaim the bytes, because layers are additive -- it shipped
+# 223 MB of a directory that does not exist at runtime.
+#
+# Only the manifest's own entries, whole-directory, refusing rather than merging
+# on collision. cp --update=none would skip colliding *files* and descend into the
+# directory, producing a package whose package.json describes one version while
+# carrying files from another. Entries are deduplicated so a repeated line reports
+# itself rather than blaming the base image.
+RUN set -eu; \
+    mkdir -p /staging/curated; \
+    n=0; \
+    for pkg in $(sed -e 's/^[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' plugins.list | tr -d '\r' | sort -u); do \
+      [ -d "/staging/node_modules/$pkg" ] || { echo "manifest entry did not install as a directory named '$pkg' -- entries must be bare package names, not version or git specs" >&2; exit 1; }; \
+      mkdir -p "/staging/curated/$(dirname "$pkg")"; \
+      cp -r "/staging/node_modules/$pkg" "/staging/curated/$pkg"; \
+      n=$((n + 1)); \
+    done; \
+    echo "staged $n curated packages"; \
+    rm plugins.list
+
+# The collision guard lives here, not in the final stage: this stage is FROM the
+# same base, so it can see the server root the payload will land in. Checking here
+# lets the final stage be a single direct COPY -- staging through /tmp there would
+# leave the whole payload in an extra layer that a later rm cannot reclaim.
+RUN set -eu; \
+    dest=/home/node/signalk/node_modules/signalk-server/node_modules; \
+    cd /staging/curated; \
+    for pkg in $(find . -mindepth 1 -maxdepth 1 ! -name '@*' -printf '%f\n'; find . -mindepth 2 -maxdepth 2 -path './@*' -printf '%P\n'); do \
+      [ -e "$dest/$pkg" ] && { echo "refusing to overwrite a package the base image provides: $pkg" >&2; exit 1; }; \
+      true; \
+    done; \
+    echo "no collisions with the base image"
 
 FROM ${BASE}
 
 USER node
 
-COPY --from=deps --chown=node:node /staging/node_modules /tmp/curated
-COPY --chown=node:node plugins.list /tmp/plugins.list
-
 # Signal K discovers modules under <appPath>/node_modules, where appPath is the
 # signalk-server package root -- not the top-level node_modules, where a plain
-# npm install would hoist them.
-#
-# Copy only the manifest's own entries, whole-directory, and refuse rather than
-# merge if one already exists. cp --update=none would skip colliding *files* and
-# descend into the directory, producing a package whose package.json describes
-# one version while carrying files from another.
-RUN set -eu; \
-    dest=/home/node/signalk/node_modules/signalk-server/node_modules; \
-    n=0; \
-    for pkg in $(sed -e 's/^[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' /tmp/plugins.list | tr -d '\r'); do \
-      [ -d "/tmp/curated/$pkg" ] || { echo "manifest entry not resolved: $pkg" >&2; exit 1; }; \
-      [ -e "$dest/$pkg" ] && { echo "refusing to overwrite base-image package: $pkg" >&2; exit 1; }; \
-      mkdir -p "$dest/$(dirname "$pkg")"; \
-      cp -r "/tmp/curated/$pkg" "$dest/$pkg"; \
-      n=$((n + 1)); \
-    done; \
-    echo "installed $n curated packages"; \
-    rm -rf /tmp/curated /tmp/plugins.list
+# npm install would hoist them. The guard below fails the build rather than
+# merging if the base image already provides one of these.
+COPY --from=deps --chown=node:node \
+     /staging/curated/ /home/node/signalk/node_modules/signalk-server/node_modules/
