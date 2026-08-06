@@ -48,8 +48,8 @@ can fail. Last run 2026-08-06, against the nested-install design:
 | Mutation | Expected | Observed |
 |---|---|---|
 | Hoisted install, whole staging tree copied into the server root | dependency-displacement assertion fails | `ws:8.21.0->7.5.13 uuid:8.3.2->14.0.1 bcryptjs:2.4.3->3.0.3 body-parser` **and** 2 uncurated plugins reported |
-| Copy to top-level `node_modules` instead of the server root | plugin assertions fail | 15/15 reported not loaded |
-| `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 14/15 not loaded, admin UI **500** |
+| Copy to top-level `node_modules` instead of the server root | plugin assertions fail | 17/17 reported not loaded |
+| `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 16/17 not loaded, admin UI **500** |
 | `public/` deleted from a webapp package | webapp assertion fails | webapp reported as not serving |
 | Manifest entry absent from the image | that entry reported not loaded | named entry failed |
 | Manifest containing only comments | vacuity guard fires | guard fired, 0 entries |
@@ -78,6 +78,13 @@ assertion.
 **Do not use a base-image package for the removal mutation.** Anything
 signalk-server ships as a dependency loads whether or not the bake did anything,
 so its assertion is unfailable. `plugins.list` deliberately contains none.
+
+**A package being another package's dependency does not make it a plugin.**
+`@halos-org/skip-freeboard-panel` and `sk-ais-status-plugin` are dependencies of
+`@halos-org/skip`, and under a hoisted install they were discovered as plugins
+and enabled by default without ever being curated. Nesting stopped that, which
+is correct — but they are wanted, so they are listed explicitly. Only manifest
+entries reach the server package root where discovery looks.
 
 ## Requirements
 
