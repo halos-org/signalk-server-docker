@@ -31,6 +31,20 @@ BASE=signalk/signalk-server:v2.30.0-core ./run verify
 | Every dependency signalk-server declares resolves as it does in the base image | The bake displacing the server's own dependency closure |
 | `/admin/` serves 200 with a body | The bake displacing the base image's admin UI — not a manifest entry, so the webapp loop does not cover it |
 | Manifest parsed to a non-zero count | A parsing change that makes the whole check vacuous |
+| `signalk-to-influxdb2` is in the manifest | Marine logging silently off — see below |
+
+The last two are manifest preconditions, settled before the image is started
+rather than against the running server. The InfluxDB one is a contract with
+`halos-marine-containers`: its `prestart.sh` writes that plugin's token config on
+every start unconditionally, because it cannot look for a plugin that lives in
+the image rather than in the data volume. Drop the entry and the device gets a
+config file addressed to a plugin that is not there — with every behavioural
+assertion here still green, because a package absent from the manifest is a
+package this harness never asks about.
+
+Vacuity is checked first: an empty parse also satisfies "signalk-to-influxdb2 is
+missing", and reporting a missing package when the real fault is a broken parser
+points the reader at the wrong file.
 
 The expected set is read from `plugins.list` at run time, never hardcoded —
 hardcoding lets a silently-dropped package pass.
@@ -54,8 +68,15 @@ filesystem-walk probe:
 | `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 16/17 not loaded, admin UI **500** |
 | `public/` deleted from a webapp package | webapp assertion fails | webapp reported as not serving |
 | Manifest entry absent from the image | that entry reported not loaded | named entry failed |
-| Manifest containing only comments | vacuity guard fires | guard fired, 0 entries |
-| Unmutated control | passes | PASS |
+| Manifest containing only comments | vacuity guard fires | fired before the image started, naming the parse |
+| `signalk-to-influxdb2` removed from the manifest | InfluxDB contract guard fires | fired before the image started, naming the entry and the consequence |
+| Unmutated control | passes | PASS, 23 assertions |
+
+Rows 1, 7, 8 and the control were re-run on 2026-08-06 when the manifest
+preconditions were added. Rows 2–6 were not: each needs a purpose-built image,
+and each leaves the manifest unmutated, so both new checks pass and fall through
+before any of those rows' behaviour is reached. Row 1 was re-run against a
+surviving hoisted build and reproduced the same 35 displacements listed above.
 
 ### Lessons this table has already paid for
 

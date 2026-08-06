@@ -6,11 +6,16 @@ on:
     # Only files that change the image enter the publish path. Without this, a
     # docs-only merge resolves the same tag, trips the already-published guard,
     # and reddens main for a change that could not have affected the image.
+    #
+    # tests/ is deliberately absent. Every PR below builds and verifies with no
+    # paths filter, so a harness change is already exercised against a build of
+    # that exact commit. Listing it here would instead make each test-only
+    # improvement demand a BUILD bump, and republishing re-resolves the unpinned
+    # plugin set -- churning what the marine app pins to re-run a test.
     paths:
       - Dockerfile
       - plugins.list
       - build.env
-      - tests/*.sh
       - run
       - .github/workflows/build.yml
   pull_request:

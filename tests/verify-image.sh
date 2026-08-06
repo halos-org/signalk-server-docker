@@ -58,6 +58,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Manifest preconditions. Contracts about the manifest's contents, not claims
+# about the running server, so they are settled before the 90s of booting one.
+#
+# Vacuity first: an empty parse satisfies "signalk-to-influxdb2 is missing" too,
+# and reporting a missing package when the real fault is a broken parser sends
+# the reader to the wrong file.
+[ "$(manifest_entries | grep -c .)" -gt 0 ] ||
+  die "manifest parsed to zero entries -- every check below would pass vacuously"
+
+# halos-marine-containers' prestart.sh writes signalk-to-influxdb2's token config
+# on every start unconditionally, because it cannot look for a plugin that lives
+# in the image rather than in the data volume. Drop this entry and marine logging
+# stops silently: a config file addressed to a plugin that is not there, and
+# every other assertion below still green.
+manifest_entries | grep -qxF 'signalk-to-influxdb2' ||
+  die "signalk-to-influxdb2 is missing from ${MANIFEST} -- halos-marine-containers' prestart.sh writes its config unconditionally, so marine logging would stop with no other assertion failing"
+
 # The entrypoint hard-codes --securityenabled, so the module listings are 401
 # without a bootstrapped admin. Seed the shape halos-marine-containers'
 # prestart.sh writes, then log in for a token.
@@ -160,7 +177,6 @@ while IFS= read -r pkg; do
     ok "loaded: ${pkg}@${served}"
   fi
 done < <(manifest_entries)
-[ "$count" -gt 0 ] || bad "manifest parsed to zero entries -- the check would pass vacuously"
 echo "  (${count} manifest entries checked)"
 
 # --- webapps actually serve their payload ------------------------------------
