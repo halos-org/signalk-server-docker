@@ -12,5 +12,8 @@ pre-commit:
     manifest-lf:
       glob: "plugins.list"
       # The manifest is parsed line by line; a CR would make every entry "name\r".
-      run: '! grep -qU $'"'"'\r'"'"' plugins.list'
+      # printf rather than $'\r': lefthook runs this through the system shell, and
+      # under dash ANSI-C quoting is not expanded, so the guard would search for a
+      # literal "$r" and silently pass on a CRLF file.
+      run: '! LC_ALL=C grep -qU "$(printf "\r")" plugins.list'
       fail_text: "plugins.list contains CRLF line endings. It must be LF only."

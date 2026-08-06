@@ -64,16 +64,21 @@ function plugin-versions {
   #@ Report the plugin versions resolved into an image
   #@ Category: Image
   local image="${1:-${IMAGE_NAME}:$(version)}"
-  local pkgs
   # Nothing is pinned, matching upstream -- so what a published tag actually
   # contains is answered by asking the image, not by reading a lockfile.
-  mapfile -t pkgs < <(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' plugins.list | tr -d '\r')
+  # Enumerated from the image rather than from the manifest, so anything that
+  # arrived as a dependency shows up in the record too.
   docker run --rm --entrypoint node "${image}" -e '
+    const fs = require("fs");
     const root = "/home/node/signalk/node_modules/signalk-server/node_modules/";
-    for (const p of process.argv.slice(1)) {
-      try { console.log(p + "@" + require(root + p + "/package.json").version); }
-      catch { console.log(p + "  MISSING"); }
-    }' "${pkgs[@]}"
+    const names = [];
+    for (const e of fs.readdirSync(root)) {
+      if (e.startsWith("@")) for (const s of fs.readdirSync(root + e)) names.push(e + "/" + s);
+      else names.push(e);
+    }
+    for (const p of names.sort()) {
+      try { console.log(p + "@" + require(root + p + "/package.json").version); } catch {}
+    }'
 }
 
 ################################################################################
@@ -83,22 +88,6 @@ function install-hooks {
   #@ Install lefthook pre-commit hooks
   #@ Category: Maintenance
   lefthook install
-}
-
-function bump {
-  #@ Show how to change the published image version
-  #@ Category: Maintenance
-  cat <<'EOF'
-Everything versionable lives in build.env.
-
-  Upstream bump    set BASE to the new image reference, reset BUILD=1
-  Plugin change    increment BUILD
-  Rebuild          increment BUILD
-
-The published tag is <upstream version>-<BUILD>, where the version half is
-read from the base image at build time -- BASE is never parsed. Run
-./run version to see what the current build.env would publish.
-EOF
 }
 
 ################################################################################

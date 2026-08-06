@@ -1,54 +1,83 @@
 # Verification
 
-`verify-image.sh` is the only thing standing between a green build and an image
-where nothing loads. A Dockerfile that puts the curated packages in the wrong
-directory builds without error, starts without error, and serves no plugins.
+`verify-image.sh` is the only gate between a green build and an image that is
+wrong. Two distinct failure modes have to be caught, and the second is the one
+that is easy to miss:
+
+1. A package lands where Signal K does not discover it — builds clean, serves
+   nothing.
+2. A package lands where Signal K *does* discover it and shadows one
+   signalk-server itself needs — builds clean, serves everything, and silently
+   downgrades the server's own dependencies.
 
 ```bash
 ./run build && ./run verify
+```
+
+Set `BASE` to enable the two comparisons against the base image (CI does):
+
+```bash
+BASE=signalk/signalk-server:v2.30.0-core ./run verify
 ```
 
 ## What it asserts, and why each one
 
 | Assertion | Catches |
 |---|---|
-| Every `plugins.list` entry appears in the union of `/skServer/plugins` and `/skServer/webapps` | Packages installed to a directory Signal K does not discover |
-| Manifest parsed to a non-zero count | A parsing change that silently makes the whole check vacuous |
-| `/admin/` returns 200 with a non-empty body | The bake displacing the base image's own admin UI |
-| `serialport` resolves from the server package root | The bake pruning a base-image dependency as extraneous |
+| Every manifest entry appears in the union of `/skServer/plugins` and `/skServer/webapps` | Packages installed where discovery does not look |
+| …at the version baked into the image | A stale copy shadowing the baked one; a hybrid package tree |
+| Every manifest webapp serves 200 with a body at its URL | A webapp present in the listing whose payload is missing — the listing is a `package.json` keyword scan, not evidence anything is served |
+| Nothing loads that is neither in the manifest nor in the base image | A plugin arriving as another plugin's dependency and shipping enabled-by-default |
+| Every dependency signalk-server declares resolves as it does in the base image | The bake displacing the server's own dependency closure |
+| `/admin/` serves 200 with a body | The bake displacing the base image's admin UI — not a manifest entry, so the webapp loop does not cover it |
+| Manifest parsed to a non-zero count | A parsing change that makes the whole check vacuous |
 
-The expected set is read from `plugins.list` at run time rather than hardcoded.
-Hardcoding lets a silently-dropped package pass.
+The expected set is read from `plugins.list` at run time, never hardcoded —
+hardcoding lets a silently-dropped package pass.
 
 The union matters: `/skServer/webapps` filters out packages whose plugin is not
-enabled, and the image enables nothing, so most curated entries appear only in
-the plugins listing.
+enabled, and the image enables nothing, so most entries appear only in the
+plugins listing.
 
 ## Mutation table
 
 **Re-run this whenever the script's assertions change, or whenever anything the
 harness reads changes.** A check never observed failing is not evidence that it
-can fail. Last run 2026-08-06, after the versioning rework:
+can fail. Last run 2026-08-06, against the nested-install design:
 
-| Mutation | Expected result | Observed |
+| Mutation | Expected | Observed |
 |---|---|---|
-| Copy packages to top-level `node_modules` instead of the server root | plugin assertions fail | 15/16 reported not loaded |
-| `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 15/16 not loaded, admin UI **500** |
-| Add a manifest entry absent from the image | that entry reported not loaded | named entry failed |
+| Hoisted install, whole staging tree copied into the server root | dependency-displacement assertion fails | `ws:8.21.0->7.5.13 uuid:8.3.2->14.0.1 bcryptjs:2.4.3->3.0.3 body-parser` **and** 2 uncurated plugins reported |
+| Copy to top-level `node_modules` instead of the server root | plugin assertions fail | 15/15 reported not loaded |
+| `npm install` in place at `/home/node/signalk` | plugin assertions fail, admin UI breaks | 14/15 not loaded, admin UI **500** |
+| `public/` deleted from a webapp package | webapp assertion fails | webapp reported as not serving |
+| Manifest entry absent from the image | that entry reported not loaded | named entry failed |
 | Manifest containing only comments | vacuity guard fires | guard fired, 0 entries |
+| Unmutated control | passes | PASS |
 
-Two things that table taught, worth keeping:
+### Lessons this table has already paid for
 
-**The structural check is weaker than the behavioural one.** Under the in-place
-mutation, `require.resolve` on the admin-UI package succeeded while the HTTP
-request returned 500. The directory survived; something it needed did not. Never
-substitute a file or resolve check for asking the running server.
+**The first version of this harness passed the hoisted build.** Every plugin
+loaded, the admin UI served, and 35 of signalk-server's own dependencies had
+been silently substituted — including a `ws` major downgrade on the WebSocket
+layer every instrument streams over. Assertions that only ask "did the things I
+added load?" cannot see what those things displaced. The dependency-comparison
+row exists because of that miss.
 
-**`@signalk/course-provider` is a vacuous assertion.** It is a non-optional
-dependency of signalk-server, so the stock `-core` image already serves it — it
-loaded even under the no-relocation mutation. Do not use it as the removed
-package when re-running the mutation table, and think twice before adding other
-server dependencies to the manifest.
+**A structural check is weaker than a behavioural one, and can be weaker than it
+looks.** An earlier `require.resolve('serialport')` check was reported as
+catching "the bake pruning a base-image dependency". It resolved the *top-level*
+copy, which this Dockerfile never touches, so it could not fail for anything the
+bake does. It was replaced by the base-image comparison above.
+
+**Presence in a listing is not evidence of serving.** Deleting only `public/`
+from `@halos-org/skip` and `@signalk/freeboard-sk` left the harness green while
+both URLs 404'd — webapp discovery is a keyword scan. Hence the payload
+assertion.
+
+**Do not use a base-image package for the removal mutation.** Anything
+signalk-server ships as a dependency loads whether or not the bake did anything,
+so its assertion is unfailable. `plugins.list` deliberately contains none.
 
 ## Requirements
 

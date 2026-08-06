@@ -1,15 +1,17 @@
 # Curated Signal K plugins and webapps for HaLOS Marine.
 #
-# provision.sh installs any entry not already present in ~/.signalk/node_modules;
-# thereafter the Signal K app store updates each one individually (no deb rebuild).
+# Baked into the image at build time, into the signalk-server package root.
+# The Signal K app store can still update any entry afterwards; those updates land
+# in the data volume, which shadows the baked copy and wins.
+#
+# Do not list packages signalk-server already ships as dependencies -- their
+# assertion would pass whether or not the bake did anything.
 
 # Webapps (UI)
 @signalk/freeboard-sk
 @halos-org/skip
 @signalk/charts-plugin
 
-# Navigation / course
-@signalk/course-provider
 
 # NMEA I/O
 @signalk/signalk-to-nmea0183

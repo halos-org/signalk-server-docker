@@ -15,6 +15,3 @@ Thumbs.db
 
 # Worktrees (see workspace AGENTS.md)
 .worktrees/
-
-# Local workflow artifacts
-_local/

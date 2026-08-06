@@ -1,7 +1,13 @@
 name: Tag release
 
+# Gated on the build succeeding, not on the push. Triggering on push would tag a
+# commit whose image failed verification or never published -- and because the
+# tag-exists check below short-circuits, the corrected re-merge would never move
+# it, leaving the tag permanently pointing at the broken commit.
 on:
-  push:
+  workflow_run:
+    workflows: ["Build and publish"]
+    types: [completed]
     branches: [main]
 
 permissions:
@@ -9,25 +15,24 @@ permissions:
 
 jobs:
   tag:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      # The tag mirrors the published image tag, <upstream version>-<BUILD>, with
-      # a v prefix. Both halves come from build.env and the base image, never from
-      # git history -- so this workflow records what was published rather than
-      # computing it.
-      - name: Tag if this build is new
+      # Same formula as the build, via the same ./run version, so the git tag and
+      # the image tag cannot drift.
+      - name: Tag the published build
         run: |
           set -euo pipefail
           . ./build.env
           docker pull -q "$BASE"
-          upstream="$(docker run --rm --entrypoint node "$BASE" \
-            -p "require('/home/node/signalk/node_modules/signalk-server/package.json').version")"
-          tag="v${upstream}-${BUILD}"
+          version="$(./run version | head -1)"
+          tag="v${version}"
 
           if git rev-parse "$tag" >/dev/null 2>&1; then
             echo "Tag ${tag} already exists; nothing to do."
@@ -36,10 +41,10 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$tag" -m "Signal K server image ${upstream}-${BUILD}
+          git tag -a "$tag" -m "Signal K server image ${version}
 
           Base:  ${BASE}
-          Image: ghcr.io/${{ github.repository }}:${upstream}-${BUILD}
+          Image: ghcr.io/${{ github.repository }}:${version}
 
           Plugin versions are resolved at build time and not pinned, matching
           upstream. Ask the image what it contains: ./run plugin-versions <tag>"

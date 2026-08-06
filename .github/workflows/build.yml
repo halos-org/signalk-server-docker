@@ -3,9 +3,24 @@ name: Build and publish
 on:
   push:
     branches: [main]
+    # Only files that change the image enter the publish path. Without this, a
+    # docs-only merge resolves the same tag, trips the already-published guard,
+    # and reddens main for a change that could not have affected the image.
+    paths:
+      - Dockerfile
+      - plugins.list
+      - build.env
+      - tests/**
+      - .github/workflows/build.yml
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+# The tag guard is a check-then-act with a window as wide as the build. Without
+# serialisation two merges can both pass it and the later push silently wins.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -25,40 +40,58 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Everything versionable lives in build.env. The tag's version half is read
-      # from the base image's own installed signalk-server rather than parsed out
-      # of BASE, so upstream's tag naming is never our problem.
+      # ./run version reads BUILD from build.env and the version half from the
+      # base image's own installed package.json. Shelling out keeps that formula
+      # in one place instead of a third copy here.
       - name: Resolve the published tag
         id: tag
         run: |
           set -euo pipefail
           . ./build.env
           docker pull -q "$BASE"
-          upstream="$(docker run --rm --entrypoint node "$BASE" \
-            -p "require('/home/node/signalk/node_modules/signalk-server/package.json').version")"
-          echo "base=$BASE"           >> "$GITHUB_OUTPUT"
-          echo "tag=${upstream}-${BUILD}" >> "$GITHUB_OUTPUT"
+          tag="$(./run version | head -1)"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"   >> "$GITHUB_OUTPUT"
           echo "Base:      $BASE"
-          echo "Publishes: ${upstream}-${BUILD}"
+          echo "Publishes: $tag"
 
-      # Nothing is pinned (matching upstream, whose own image resolves its bundled
-      # plugins fresh), so two builds of one commit can differ. Tags must therefore
-      # never be reused: the marine app pins by name, and republishing would swap
-      # content underneath a tag that a previous verification gated.
+      # Before the guard, not after: an unauthenticated probe cannot distinguish
+      # "tag absent" from "package is private", and a GHCR package is private
+      # until someone makes it public.
+      - name: Log in to the container registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Nothing is pinned (matching upstream), so two builds of one commit can
+      # differ. The marine app pins by name, so republishing swaps content
+      # underneath a tag a previous verification gated. A guard that treats "I
+      # could not check" as "all clear" is not a guard -- classify the failure.
       - name: Refuse to overwrite a published tag
         if: github.event_name == 'push'
         run: |
-          tag="${{ steps.tag.outputs.tag }}"
-          if docker manifest inspect "${REGISTRY}/${IMAGE_NAME}:${tag}" >/dev/null 2>&1; then
-            echo "::error::Tag ${tag} is already published. Increment BUILD in build.env." >&2
+          set -uo pipefail
+          ref="${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.tag }}"
+          if out="$(docker manifest inspect "$ref" 2>&1)"; then
+            echo "::error::Tag ${{ steps.tag.outputs.tag }} is already published. Increment BUILD in build.env." >&2
             exit 1
           fi
-          echo "Tag ${tag} is unpublished; proceeding."
+          case "$out" in
+            *"manifest unknown"*|*"not found"*|*"MANIFEST_UNKNOWN"*|*"name unknown"*)
+              echo "Tag is unpublished; proceeding." ;;
+            *)
+              echo "::error::Could not determine whether ${ref} exists: ${out}" >&2
+              exit 1 ;;
+          esac
 
       - uses: docker/setup-buildx-action@v4
 
-      # Build into the local daemon first, so verification runs against the exact
-      # image that would be pushed, before anything reaches the registry.
+      # Build once, into the local daemon. The pushed image is this exact
+      # artifact, retagged -- not a second build that could resolve different
+      # unpinned versions on a cache miss.
       - name: Build
         uses: docker/build-push-action@v7
         with:
@@ -73,28 +106,19 @@ jobs:
       - name: Install bcrypt for the verification harness
         run: python3 -m pip install --quiet --break-system-packages bcrypt
 
-      - name: Verify the image loads every curated package
+      - name: Verify the image
+        env:
+          BASE: ${{ steps.tag.outputs.base }}
         run: tests/verify-image.sh candidate:${{ github.sha }} plugins.list
 
       - name: Record resolved plugin versions
-        run: ./run plugin-versions candidate:${{ github.sha }} | tee "$GITHUB_STEP_SUMMARY"
+        run: ./run plugin-versions candidate:${{ github.sha }} | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # No registry credential exists on the pull-request path, so build-time code
-      # from an untrusted branch cannot reach the registry.
-      - name: Log in to the container registry
+      - name: Push the verified image
         if: github.event_name == 'push'
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push
-        if: github.event_name == 'push'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          build-args: BASE=${{ steps.tag.outputs.base }}
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.tag }}
-          cache-from: type=gha
+        run: |
+          set -euo pipefail
+          ref="${REGISTRY}/${IMAGE_NAME}:${{ steps.tag.outputs.tag }}"
+          docker tag "candidate:${{ github.sha }}" "$ref"
+          docker push "$ref"
+          echo "Published $ref"
