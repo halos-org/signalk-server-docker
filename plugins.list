@@ -1,0 +1,47 @@
+# Curated Signal K plugins and webapps for HaLOS Marine.
+#
+# Baked into the image at build time, into the signalk-server package root.
+# The Signal K app store can still update any entry afterwards; those updates land
+# in the data volume, which shadows the baked copy and wins.
+#
+# Do not list packages signalk-server already ships as dependencies -- their
+# assertion would pass whether or not the bake did anything.
+
+# Webapps (UI)
+@signalk/freeboard-sk
+@halos-org/skip
+@signalk/charts-plugin
+
+# Skip's companion plugins. Both are already dependencies of @halos-org/skip, so
+# listing them looks redundant -- it is not. Transitive dependencies are nested
+# under the package that needs them and are NOT discovered as Signal K plugins;
+# only entries listed here land in the server package root where discovery looks.
+# They were previously discovered by accident, via npm hoisting, and shipped
+# enabled-by-default without ever being curated.
+@halos-org/skip-freeboard-panel
+sk-ais-status-plugin
+
+
+# NMEA I/O
+@signalk/signalk-to-nmea0183
+signalk-to-nmea2000
+signalk-n2kais-to-nmea0183
+@signalk/udp-nmea-plugin
+@signalk/set-system-time
+
+# Derived / performance / vessel state
+signalk-derived-data
+signalk-polar-performance-plugin
+@meri-imperiumi/signalk-autostate
+
+# Safety
+signalk-anchoralarm-plugin
+
+# Sensors / misc
+signalk-flags
+
+# Logging (configured with the InfluxDB token by prestart)
+signalk-to-influxdb2
+
+# Automation
+@signalk/signalk-node-red

@@ -1,0 +1,17 @@
+# Local build artifacts
+*.tar
+*.tar.gz
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Worktrees (see workspace AGENTS.md)
+.worktrees/

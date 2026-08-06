@@ -1,0 +1,59 @@
+name: Tag release
+
+# Gated on the build succeeding, not on the push. Triggering on push would tag a
+# commit whose image failed verification or never published -- and because the
+# tag-exists check below short-circuits, the corrected re-merge would never move
+# it, leaving the tag permanently pointing at the broken commit.
+on:
+  workflow_run:
+    workflows: ["Build and publish"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    # event == 'push' as well as success: workflow_run fires for pull_request and
+    # workflow_dispatch runs too. branches: [main] matches the HEAD branch, which
+    # for a fork PR is the fork's own branch name -- so a fork PR from its main
+    # would run fork code here with contents: write, and tag a commit that never
+    # merged and never published.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      # Same formula as the build, via the same ./run version, so the git tag and
+      # the image tag cannot drift.
+      - name: Tag the published build
+        run: |
+          set -euo pipefail
+          . ./build.env
+          docker pull -q "$BASE"
+          version="$(./run version | head -1)"
+          tag="v${version}"
+
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "Tag ${tag} already exists; nothing to do."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Signal K server image ${version}
+
+          Base:  ${BASE}
+          Image: ghcr.io/${{ github.repository }}:${version}
+
+          Plugin versions are resolved at build time and not pinned, matching
+          upstream. Ask the image what it contains: ./run plugin-versions <tag>"
+          git push origin "$tag"
+          echo "Created ${tag}"

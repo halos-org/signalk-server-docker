@@ -1,0 +1,2 @@
+# The manifest is parsed line by line; CRLF would make every entry "name\r".
+plugins.list text eol=lf
