@@ -1,0 +1,86 @@
+name: Check upstream base image
+
+# BASE is the only thing here that goes stale on its own, and nothing else
+# watches it: the marine app pins our image, so its update checker follows our
+# GHCR tags and never looks at upstream's.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: check-base-update
+  cancel-in-progress: true
+
+env:
+  BRANCH: chore/update-base-image
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write        # push the bump branch
+      pull-requests: write   # open or refresh the PR
+      actions: write         # dispatch the build that verifies it
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The detection lives in a script rather than in ./run because `run` is in
+      # build.yml's paths filter: a command added there would put every merge
+      # that touches it on the publish path, where it resolves an already
+      # published tag and reddens main.
+      - name: Look for a newer base image
+        id: check
+        run: .github/scripts/check-base-update.sh
+
+      - name: Open or refresh the bump PR
+        if: steps.check.outputs.has_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_BASE: ${{ steps.check.outputs.new_base }}
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+
+          # Re-pushing an unchanged bump every morning would re-dispatch the
+          # build below with it, so the branch is only touched when it does not
+          # already carry this exact build.env -- and only while a PR is open,
+          # so a run that died before opening one still recovers.
+          if [ -n "$existing" ] && git fetch --quiet origin "$BRANCH" 2>/dev/null &&
+             git show FETCH_HEAD:build.env | diff -q - build.env >/dev/null 2>&1; then
+            echo "PR #${existing} already carries this bump."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add -u
+          git commit -m "chore: bump base image to ${NEW_BASE#*:}"
+          git push --force origin "$BRANCH"
+
+          cat >> /tmp/pr_body.md <<EOF
+
+          Verification: [build.yml on \`${BRANCH}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/build.yml?query=branch%3A${BRANCH//\//%2F})
+          EOF
+
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body-file /tmp/pr_body.md
+            echo "Updated #${existing}"
+          else
+            gh pr create \
+              --title "chore: bump base image to ${NEW_BASE#*:}" \
+              --body-file /tmp/pr_body.md
+          fi
+
+          # Last, so a dispatch that fails leaves the PR standing rather than
+          # swallowing it. A PR opened with GITHUB_TOKEN raises no pull_request
+          # event, so build.yml would never run on it otherwise -- and an
+          # unevaluated bump is the one thing this PR exists to get evaluated.
+          # workflow_dispatch is one of the two events that token may still
+          # trigger, and a dispatched run builds and verifies without publishing
+          # (the publish steps are gated on the event).
+          gh workflow run build.yml --ref "$BRANCH"
