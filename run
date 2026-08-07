@@ -38,7 +38,10 @@ function upstream_version {
 function version {
   #@ Print the tag the current build.env would publish
   #@ Category: Image
-  echo "$(upstream_version)-${BUILD}"
+  # `-halos.` marks where upstream's version ends and ours begins. A bare
+  # `2.30.0-1` cannot be split by anything that does not already know the
+  # convention, so whatever reads the tag takes the whole string for upstream's.
+  echo "v$(upstream_version)-halos.${BUILD}"
 }
 
 function build {

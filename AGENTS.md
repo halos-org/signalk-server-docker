@@ -105,7 +105,10 @@ BASE=signalk/signalk-server:v2.30.0-core   # verbatim, never parsed
 BUILD=1                                    # our revision of that base
 ```
 
-The published tag is `<upstream version>-<BUILD>`, e.g. `2.30.0-1`. The version
+The published tag is `v<upstream version>-halos.<BUILD>`, e.g. `v2.30.0-halos.1`.
+The `-halos.` separator is load-bearing: it is the only thing that tells a reader
+-- or the shared update bot -- which half is upstream's and which is ours. The
+same convention is used by `ghcr.io/hatlabs/homarr`. The version
 half is read from the base image's own installed `signalk-server/package.json`
 at build time -- **not** parsed out of `BASE`. Whatever upstream calls its tags
 is upstream's business; what is actually installed is the fact we publish. The
@@ -143,7 +146,7 @@ recoverable from the artifact itself -- every package's `package.json` ships in
 the image:
 
 ```bash
-./run plugin-versions ghcr.io/halos-org/signalk-server-docker:2.30.0-1
+./run plugin-versions ghcr.io/halos-org/signalk-server-docker:v2.30.0-halos.1
 ```
 
 CI runs this on every build and writes it to the job summary, so "which versions
