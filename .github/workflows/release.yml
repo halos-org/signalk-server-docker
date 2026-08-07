@@ -31,15 +31,16 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      # Same formula as the build, via the same ./run version, so the git tag and
-      # the image tag cannot drift.
+      # The git tag is the image tag verbatim -- ./run version owns the whole
+      # string, including the `v`. Deriving it a second time here is what makes
+      # them drift.
       - name: Tag the published build
         run: |
           set -euo pipefail
           . ./build.env
           docker pull -q "$BASE"
-          version="$(./run version | head -1)"
-          tag="v${version}"
+          tag="$(./run version | head -1)"
+          version="$tag"
 
           if git rev-parse "$tag" >/dev/null 2>&1; then
             echo "Tag ${tag} already exists; nothing to do."

@@ -105,11 +105,20 @@ BASE=signalk/signalk-server:v2.30.0-core   # verbatim, never parsed
 BUILD=1                                    # our revision of that base
 ```
 
-The published tag is `<upstream version>-<BUILD>`, e.g. `2.30.0-1`. The version
-half is read from the base image's own installed `signalk-server/package.json`
-at build time -- **not** parsed out of `BASE`. Whatever upstream calls its tags
-is upstream's business; what is actually installed is the fact we publish. The
-Dockerfile never mentions a version, so an upstream bump does not touch it.
+The published tag is `v<upstream version>-halos.<BUILD>`, e.g. `v2.30.0-halos.2`,
+matching what `ghcr.io/hatlabs/homarr` publishes. The `-halos.` separator is the
+only thing that tells a consumer which half is upstream's and which is ours.
+
+Nothing parses it yet. `check-image-updates.sh` in `shared-workflows` strips a
+leading `v` and treats the rest as upstream's version, so it still has to be
+taught the split before it writes correct metadata for these tags
+(halos-marine-containers#212).
+
+The version half is read from the base image's own installed
+`signalk-server/package.json` at build time -- **not** parsed out of `BASE`.
+Whatever upstream calls its tags is upstream's business; what is actually
+installed is the fact we publish. The Dockerfile never mentions a version, so an
+upstream bump does not touch it.
 
 - Upstream bump: set `BASE`, reset `BUILD=1`
 - Plugin change or rebuild: increment `BUILD`
@@ -143,7 +152,7 @@ recoverable from the artifact itself -- every package's `package.json` ships in
 the image:
 
 ```bash
-./run plugin-versions ghcr.io/halos-org/signalk-server-docker:2.30.0-1
+./run plugin-versions ghcr.io/halos-org/signalk-server-docker:v2.30.0-halos.2
 ```
 
 CI runs this on every build and writes it to the job summary, so "which versions
@@ -155,7 +164,8 @@ were in that tag?" is answerable from the run that produced it.
 2. Increment `BUILD` in `build.env`
 3. Merge; CI builds, verifies and publishes the new tag
 4. Repin the tag in `halos-marine-containers/apps/signalk-server/docker-compose.yml`
-   and bump that app's `metadata.yaml`
+   and bump that app's `metadata.yaml`. `test_image_is_the_baked_one_at_an_exact_tag`
+   there asserts the tag shape, so it moves with the pin.
 
 Do not add packages that signalk-server already ships as non-optional dependencies.
 `@signalk/course-provider` is one: it loads whether or not the bake did anything, so
