@@ -6,7 +6,7 @@
 # pins, and stage the bump if so: BASE to the newer reference, BUILD back to 1 --
 # the upstream-bump procedure in AGENTS.md, performed by a machine.
 #
-# Outputs (GITHUB_OUTPUT): has_update, old_base, new_base
+# Outputs (GITHUB_OUTPUT): has_update, new_base
 # On an update it rewrites build.env and writes the PR body to /tmp/pr_body.md.
 #
 # Safe to run locally: it only edits a tracked file, and the edit is a diff.
@@ -155,7 +155,6 @@ EOF
 
 {
   echo "has_update=true"
-  echo "old_base=${OLD_BASE}"
   echo "new_base=${LATEST_BASE}"
 } >> "$GITHUB_OUTPUT"
 
