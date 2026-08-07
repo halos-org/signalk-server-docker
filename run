@@ -38,10 +38,21 @@ function upstream_version {
 function version {
   #@ Print the tag the current build.env would publish
   #@ Category: Image
-  # `-halos.` marks where upstream's version ends and ours begins. A bare
-  # `2.30.0-1` cannot be split by anything that does not already know the
-  # convention, so whatever reads the tag takes the whole string for upstream's.
-  echo "v$(upstream_version)-halos.${BUILD}"
+  # `-halos.` is what a consumer splits on to tell upstream's version from our
+  # build revision. Both halves are checked before they reach a tag name: an
+  # unreadable base image or a non-numeric BUILD would otherwise compose a
+  # string Docker accepts, and a published tag is never reused.
+  local upstream
+  upstream="$(upstream_version)"
+  if [[ ! "${upstream}" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    echo "ERROR: no version read from ${BASE} (got '${upstream}')" >&2
+    return 1
+  fi
+  if [[ ! "${BUILD}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: BUILD in build.env must be a whole number (got '${BUILD}')" >&2
+    return 1
+  fi
+  echo "v${upstream}-halos.${BUILD}"
 }
 
 function build {
