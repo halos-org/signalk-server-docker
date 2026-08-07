@@ -2,7 +2,7 @@
 
 **THESE RULES ONLY APPLY TO FILES IN /signalk-server-docker/**
 
-**LAST MODIFIED**: 2026-08-06
+**LAST MODIFIED**: 2026-08-07
 
 ## For agentic coding: use the HaLOS workspace
 
@@ -120,7 +120,8 @@ Whatever upstream calls its tags is upstream's business; what is actually
 installed is the fact we publish. The Dockerfile never mentions a version, so an
 upstream bump does not touch it.
 
-- Upstream bump: set `BASE`, reset `BUILD=1`
+- Upstream bump: set `BASE`, reset `BUILD=1` -- proposed daily by a scheduled
+  check, see *Watching upstream*
 - Plugin change or rebuild: increment `BUILD`
 
 `./run version` prints what the current `build.env` would publish, without
@@ -157,6 +158,40 @@ the image:
 
 CI runs this on every build and writes it to the job summary, so "which versions
 were in that tag?" is answerable from the run that produced it.
+
+## Watching upstream
+
+Nothing else watches `BASE`. The marine app pins *our* image, so its daily image
+check follows our GHCR tags and never looks at upstream's.
+
+`check-upstream.yml` runs `.github/scripts/check-base-update.sh` daily: it lists
+every tag of the repository `BASE` names, keeps those shaped like the tag `BASE`
+pins, and opens a PR setting `BASE` to the newest of them and `BUILD` back to 1.
+
+The shape is derived from the pinned tag -- digit runs wildcarded, everything
+else literal -- so `-alpine-core`, `-beta.2`, two-component `v2.30-core` and the
+per-commit `sha-`/`master-` tags are excluded by construction rather than by a
+list of things to skip, and upstream's tag format stays upstream's business. A
+candidate also has to carry an active linux/arm64 image, and the pinned tag is
+always the floor, so a tag upstream deletes cannot produce a downgrade.
+
+Every page of the listing is read. Upstream has ~2500 tags, nearly all of them
+CI tags, so release tags sit at an arbitrary page -- the first page alone
+contains none of them, and a checker that stopped there would report "up to
+date" forever. The script fails rather than reporting calm when the listing
+matches nothing at all or carries no per-image architecture data: this whole
+check exists because a silent gap went unnoticed.
+
+The detection is a script rather than a `./run` command because `run` is in
+build.yml's paths filter -- a command added there would put every merge touching
+it on the publish path, where it resolves an already published tag and fails.
+
+A PR opened with `GITHUB_TOKEN` raises no `pull_request` event, so build.yml
+would never run on it. The workflow therefore dispatches build.yml on the branch
+explicitly, `workflow_dispatch` being one of the two events that token may still
+trigger; that run builds and verifies without publishing, since the publish
+steps are gated on the event. Without it the PR would be an unevaluated bump,
+which is the one thing it exists to get evaluated.
 
 ## Changing the plugin set
 
