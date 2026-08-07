@@ -172,15 +172,25 @@ The shape is derived from the pinned tag -- digit runs wildcarded, everything
 else literal -- so `-alpine-core`, `-beta.2`, two-component `v2.30-core` and the
 per-commit `sha-`/`master-` tags are excluded by construction rather than by a
 list of things to skip, and upstream's tag format stays upstream's business. A
-candidate also has to carry an active linux/arm64 image, and the pinned tag is
-always the floor, so a tag upstream deletes cannot produce a downgrade.
+candidate also has to carry a linux/arm64 image, and the pinned tag is always
+the floor, so a tag upstream deletes cannot produce a downgrade.
+
+Only Docker Hub is queried; a `BASE` on any other registry exits non-zero rather
+than reporting up to date.
 
 Every page of the listing is read. Upstream has ~2500 tags, nearly all of them
 CI tags, so release tags sit at an arbitrary page -- the first page alone
 contains none of them, and a checker that stopped there would report "up to
-date" forever. The script fails rather than reporting calm when the listing
-matches nothing at all or carries no per-image architecture data: this whole
-check exists because a silent gap went unnoticed.
+date" forever. The script fails rather than reporting calm when no tag matches
+the pinned shape, or when none of the matching tags appears to have an arm64
+image -- the pinned tag is the control there, since the build pulls it on every
+merge. This whole check exists because a silent gap went unnoticed.
+
+Note what is *not* used: the listing's per-image `status`. It reports pull
+recency, not existence -- it flips to `inactive` on a tag nobody has pulled for
+about six weeks, and back the moment anyone does. An `inactive` image pulls
+normally. Filtering on it would silently drop a real release that had sat
+unmerged that long, which is the failure this check exists to end.
 
 The detection is a script rather than a `./run` command because `run` is in
 build.yml's paths filter -- a command added there would put every merge touching

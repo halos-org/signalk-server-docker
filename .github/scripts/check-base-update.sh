@@ -73,12 +73,14 @@ def all_tags(path):
 
 
 def buildable(entry):
-    # arm64 only, and a tag whose arm64 image is gone cannot be built at all --
-    # so it is not a candidate, however new it is.
+    # arm64 only, so a tag with no arm64 image is not a candidate however new it
+    # is. Deliberately not the entry's `status`: that field is pull-recency
+    # telemetry, not a property of the artifact -- it flips to "inactive" on a
+    # tag nobody has pulled for about six weeks, and back to "active" the moment
+    # anyone does. Filtering on it would drop a real release that had sat
+    # unmerged that long, which is the silent staleness this check exists to end.
     return any(
-        image.get("architecture") == "arm64"
-        and image.get("os") == "linux"
-        and image.get("status") == "active"
+        image.get("architecture") == "arm64" and image.get("os") == "linux"
         for image in entry.get("images", [])
     )
 
@@ -89,13 +91,15 @@ if not shaped:
     # listing did not contain it: upstream restructured its tags or the API
     # changed shape. Either way the answer is not "up to date".
     sys.exit(f"{path}: no tag matches the shape of {tag}; check upstream")
-if not any(entry.get("images") for entry in shaped):
-    # Without per-image architecture data every tag looks unbuildable, and an
-    # empty candidate list is indistinguishable from "upstream published
-    # nothing new". Say the listing changed shape instead of reporting calm.
-    sys.exit(f"{path}: tag listing carries no image metadata; cannot tell which tags are arm64")
 
 candidates = [entry["name"] for entry in shaped if buildable(entry)]
+if not candidates:
+    # The pinned tag is the control: build.yml builds from it on every merge, so
+    # it demonstrably has an arm64 image. If nothing shaped like it appears to
+    # have one, the listing changed shape or the filter is wrong -- and an empty
+    # candidate list would otherwise collapse to the pinned tag and report calm.
+    sys.exit(f"{path}: {len(shaped)} tags match the shape of {tag}, none with a linux/arm64 image; "
+             "the listing or the filter is wrong, which is not the same as up to date")
 print(f"{path}: {len(shaped)} tags shaped like {tag}, {len(candidates)} with a linux/arm64 image",
       file=sys.stderr)
 
