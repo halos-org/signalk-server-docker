@@ -109,10 +109,9 @@ The published tag is `v<upstream version>-halos.<BUILD>`, e.g. `v2.30.0-halos.2`
 matching what `ghcr.io/hatlabs/homarr` publishes. The `-halos.` separator is the
 only thing that tells a consumer which half is upstream's and which is ours.
 
-Nothing parses it yet. `check-image-updates.sh` in `shared-workflows` strips a
-leading `v` and treats the rest as upstream's version, so it still has to be
-taught the split before it writes correct metadata for these tags
-(halos-marine-containers#212).
+`check-image-updates.sh` in `shared-workflows` splits on the literal `-halos.`
+from the right, so the marine app's repin bot writes `upstream_version` without
+our build revision leaking into it.
 
 The version half is read from the base image's own installed
 `signalk-server/package.json` at build time -- **not** parsed out of `BASE`.
