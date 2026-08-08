@@ -109,9 +109,9 @@ The published tag is `v<upstream version>-halos.<BUILD>`, e.g. `v2.30.0-halos.2`
 matching what `ghcr.io/hatlabs/homarr` publishes. The `-halos.` separator is the
 only thing that tells a consumer which half is upstream's and which is ours.
 
-`check-image-updates.sh` in `shared-workflows` splits on the literal `-halos.`
-from the right, so the marine app's repin bot writes `upstream_version` without
-our build revision leaking into it.
+`check-image-updates.sh` in `shared-workflows` splits these tags on `-halos.`, so
+the marine app's repin bot writes the half before it as `upstream_version` and
+our build revision does not leak into a field defined as upstream's.
 
 The version half is read from the base image's own installed
 `signalk-server/package.json` at build time -- **not** parsed out of `BASE`.
@@ -206,8 +206,21 @@ silently.
 
 `main` carries a ruleset requiring the `build` check, pinned to the GitHub
 Actions integration so a status of that name from another source cannot satisfy
-it. `bypass_actors` is empty: that emptiness is the rule's whole value, since a
-repository-admin bypass would let `BUMP_PAT` push straight to `main`.
+it, with an empty `bypass_actors` and no force-push or deletion.
+
+Be precise about what that buys, because it is less than it looks. Required
+approvals are zero -- deliberately, since the end state is an unattended merge --
+and on a `pull_request` event the workflow producing the `build` check comes from
+the PR head, so a PR defines its own gate. What the ruleset guarantees is that a
+change to `main` arrived through a PR and that GitHub Actions reported `build` on
+it. It does **not** contain `BUMP_PAT`: that token holds `Contents: write` and
+`Pull requests: write`, which is everything needed to push a branch, make its own
+check green, and merge it. The credential is the trust boundary here, not the
+ruleset.
+
+Nothing in this repo asserts the ruleset still exists or still names `build`.
+Delete it and the daily bump PR still opens, still goes green, and merges with
+nothing required -- indistinguishable from a healthy PR.
 
 ## Changing the plugin set
 

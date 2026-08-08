@@ -24,12 +24,15 @@ jobs:
       contents: read         # the bump branch is pushed with BUMP_PAT, not this
 
     steps:
-      # A PR opened with GITHUB_TOKEN raises no pull_request event, so build.yml
-      # would never attach a check to it. Everything below therefore runs as
-      # BUMP_PAT -- both the push, via checkout's persisted credentials, and the
-      # gh calls. Refusing to start without it is deliberate: falling back to
-      # GITHUB_TOKEN would still open a PR, just an unverified one, and an
-      # expired token would degrade to that silently.
+      # Checkout persists this token, so the later git push runs as BUMP_PAT too
+      # -- which is why no separate push credential appears below. Failing here
+      # rather than falling back to GITHUB_TOKEN is argued in AGENTS.md.
+      #
+      # Presence, not validity: an expired or revoked token is still a non-empty
+      # string and fails at checkout instead. This catches the secret being
+      # deleted or never provisioned, which would otherwise clone anonymously
+      # from this public repo and stay green until an upstream release finally
+      # exercised the gh calls.
       - name: Require the bump credential
         env:
           BUMP_PAT: ${{ secrets.BUMP_PAT }}
