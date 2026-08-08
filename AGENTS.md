@@ -222,6 +222,26 @@ Nothing in this repo asserts the ruleset still exists or still names `build`.
 Delete it and the daily bump PR still opens, still goes green, and merges with
 nothing required -- indistinguishable from a healthy PR.
 
+The PR then merges itself. Auto-merge is enabled on it and the ruleset holds it
+until `build` is green -- indefinitely, if it never is. No human is in this path:
+**every upstream release publishes a `-halos.N` image, including a major.** The
+image is inert until something pins it, so a release that builds but should not
+ship is judged at the `halos-marine-containers` repin, which stays a human merge
+and doubles as the notice that a new image exists. A release that is genuinely
+broken fails `verify-image.sh` and leaves the PR red and unmerged.
+
+Nothing here can decline a bump, by design. Do not add a mechanism that halts on
+a human touching the branch: the pipeline exists to build our image for every
+upstream release without being asked.
+
+Auto-merge must be enabled with `BUMP_PAT` and not `GITHUB_TOKEN` for the same
+reason the PR is opened with it. GitHub completes an auto-merge on behalf of
+whoever armed it; armed by `GITHUB_TOKEN`, the resulting push to `main` would
+raise no event, `build.yml` would never publish, and every workflow in the chain
+would still be green. Enablement is re-asserted on every run that finds an open
+bump PR, including the one that has nothing else to do -- carrying the bump is
+not the same as being armed to land it.
+
 ## Changing the plugin set
 
 1. Edit `plugins.list` (LF only — `.gitattributes` pins it; the parser is line-based)

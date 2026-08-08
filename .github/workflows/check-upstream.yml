@@ -61,15 +61,40 @@ jobs:
           NEW_BASE: ${{ steps.check.outputs.new_base }}
         run: |
           set -euo pipefail
+
+          # Enabling auto-merge is per-PR state that can fail on its own: the
+          # call rejects a PR GitHub already considers mergeable, and races the
+          # mergeability computation right after creation. A non-zero exit is
+          # therefore not evidence of failure -- only the flag being absent
+          # afterwards is. Left unchecked, one bad call would strand the bump
+          # green and unmerged with every later run reporting success over it.
+          enable_auto_merge() {
+            local pr="$1" state
+            for _ in 1 2 3; do
+              gh pr merge "$pr" --auto --merge >/dev/null 2>&1 || true
+              state="$(gh pr view "$pr" --json state,autoMergeRequest \
+                       --jq 'if .autoMergeRequest then "armed" elif .state == "MERGED" then "merged" else "" end')"
+              if [ -n "$state" ]; then
+                echo "PR #${pr}: ${state}."
+                return 0
+              fi
+              sleep 5
+            done
+            echo "::error::Could not enable auto-merge on #${pr}; the bump will sit unmerged." >&2
+            return 1
+          }
+
           existing="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
 
           # Re-pushing an unchanged bump every morning would restart its check,
           # so the branch is only touched when it does not already carry this
           # exact build.env -- and only while a PR is open, so a run that died
-          # before opening one still recovers.
+          # before opening one still recovers. Auto-merge is still re-asserted:
+          # the bump being carried is not the same as it being armed to land.
           if [ -n "$existing" ] && git fetch --quiet origin "$BRANCH" 2>/dev/null &&
              git show FETCH_HEAD:build.env | diff -q - build.env >/dev/null 2>&1; then
             echo "PR #${existing} already carries this bump."
+            enable_auto_merge "$existing"
             exit 0
           fi
 
@@ -82,9 +107,13 @@ jobs:
 
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --body-file /tmp/pr_body.md
-            echo "Updated #${existing}"
+            pr="$existing"
+            echo "Updated #${pr}"
           else
-            gh pr create \
-              --title "chore: bump base image to ${NEW_BASE#*:}" \
-              --body-file /tmp/pr_body.md
+            pr="$(gh pr create \
+                    --title "chore: bump base image to ${NEW_BASE#*:}" \
+                    --body-file /tmp/pr_body.md | grep -oE '[0-9]+$')"
+            echo "Opened #${pr}"
           fi
+
+          enable_auto_merge "$pr"
