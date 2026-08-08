@@ -2,7 +2,7 @@
 
 **THESE RULES ONLY APPLY TO FILES IN /signalk-server-docker/**
 
-**LAST MODIFIED**: 2026-08-07
+**LAST MODIFIED**: 2026-08-08
 
 ## For agentic coding: use the HaLOS workspace
 
@@ -196,12 +196,19 @@ The detection is a script rather than a `./run` command because `run` is in
 build.yml's paths filter -- a command added there would put every merge touching
 it on the publish path, where it resolves an already published tag and fails.
 
-A PR opened with `GITHUB_TOKEN` raises no `pull_request` event, so build.yml
-would never run on it. The workflow therefore dispatches build.yml on the branch
-explicitly, `workflow_dispatch` being one of the two events that token may still
-trigger; that run builds and verifies without publishing, since the publish
-steps are gated on the event. Without it the PR would be an unevaluated bump,
-which is the one thing it exists to get evaluated.
+The PR is opened with the `BUMP_PAT` secret, not `GITHUB_TOKEN`. A PR opened
+with `GITHUB_TOKEN` raises no `pull_request` event, so build.yml would never
+attach a check to it -- the bump would arrive unevaluated, which is the one
+thing it exists to get evaluated. `BUMP_PAT` is a fine-grained token scoped to
+this repo alone with `Contents: write` and `Pull requests: write`; the workflow
+refuses to start without it rather than falling back, because the fallback opens
+a PR that merely *looks* fine, and an expired token would degrade to that
+silently.
+
+`main` carries a ruleset requiring the `build` check, pinned to the GitHub
+Actions integration so a status of that name from another source cannot satisfy
+it. `bypass_actors` is empty: that emptiness is the rule's whole value, since a
+repository-admin bypass would let `BUMP_PAT` push straight to `main`.
 
 ## Changing the plugin set
 

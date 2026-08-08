@@ -21,12 +21,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write        # push the bump branch
-      pull-requests: write   # open or refresh the PR
-      actions: write         # dispatch the build that verifies it
+      contents: read         # the bump branch is pushed with BUMP_PAT, not this
 
     steps:
+      # A PR opened with GITHUB_TOKEN raises no pull_request event, so build.yml
+      # would never attach a check to it. Everything below therefore runs as
+      # BUMP_PAT -- both the push, via checkout's persisted credentials, and the
+      # gh calls. Refusing to start without it is deliberate: falling back to
+      # GITHUB_TOKEN would still open a PR, just an unverified one, and an
+      # expired token would degrade to that silently.
+      - name: Require the bump credential
+        env:
+          BUMP_PAT: ${{ secrets.BUMP_PAT }}
+        run: |
+          [ -n "$BUMP_PAT" ] || {
+            echo "::error::BUMP_PAT is unset. It opens the bump PR so build.yml runs on it as a check; without it the PR would carry none." >&2
+            exit 1
+          }
+
       - uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.BUMP_PAT }}
 
       # The detection lives in a script rather than in ./run because `run` is in
       # build.yml's paths filter: a command added there would put every merge
@@ -39,31 +54,19 @@ jobs:
       - name: Open or refresh the bump PR
         if: steps.check.outputs.has_update == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.BUMP_PAT }}
           NEW_BASE: ${{ steps.check.outputs.new_base }}
         run: |
           set -euo pipefail
           existing="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
 
-          # Re-pushing an unchanged bump every morning would re-dispatch the
-          # build below with it, so the branch is only touched when it does not
-          # already carry this exact build.env -- and only while a PR is open,
-          # so a run that died before opening one still recovers.
+          # Re-pushing an unchanged bump every morning would restart its check,
+          # so the branch is only touched when it does not already carry this
+          # exact build.env -- and only while a PR is open, so a run that died
+          # before opening one still recovers.
           if [ -n "$existing" ] && git fetch --quiet origin "$BRANCH" 2>/dev/null &&
              git show FETCH_HEAD:build.env | diff -q - build.env >/dev/null 2>&1; then
-            # Carrying the bump is not the same as having been evaluated. The
-            # dispatch is the last thing this step does, so a run that failed or
-            # was cancelled after opening the PR leaves a bump nothing will ever
-            # build -- and without this, every later run would take the exit
-            # below and report success over it forever.
-            head="$(git rev-parse FETCH_HEAD)"
-            if [ -n "$(gh run list --workflow build.yml --branch "$BRANCH" --commit "$head" \
-                       --limit 1 --json databaseId --jq '.[0].databaseId // empty')" ]; then
-              echo "PR #${existing} carries this bump and ${head} has been built."
-              exit 0
-            fi
-            echo "PR #${existing} carries this bump but nothing built ${head}; dispatching."
-            gh workflow run build.yml --ref "$BRANCH"
+            echo "PR #${existing} already carries this bump."
             exit 0
           fi
 
@@ -74,11 +77,6 @@ jobs:
           git commit -m "chore: bump base image to ${NEW_BASE#*:}"
           git push --force origin "$BRANCH"
 
-          cat >> /tmp/pr_body.md <<EOF
-
-          Verification: [build.yml on \`${BRANCH}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/build.yml?query=branch%3A${BRANCH//\//%2F})
-          EOF
-
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --body-file /tmp/pr_body.md
             echo "Updated #${existing}"
@@ -87,12 +85,3 @@ jobs:
               --title "chore: bump base image to ${NEW_BASE#*:}" \
               --body-file /tmp/pr_body.md
           fi
-
-          # Last, so a dispatch that fails leaves the PR standing rather than
-          # swallowing it. A PR opened with GITHUB_TOKEN raises no pull_request
-          # event, so build.yml would never run on it otherwise -- and an
-          # unevaluated bump is the one thing this PR exists to get evaluated.
-          # workflow_dispatch is one of the two events that token may still
-          # trigger, and a dispatched run builds and verifies without publishing
-          # (the publish steps are gated on the event).
-          gh workflow run build.yml --ref "$BRANCH"
