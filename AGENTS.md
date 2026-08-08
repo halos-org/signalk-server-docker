@@ -2,7 +2,7 @@
 
 **THESE RULES ONLY APPLY TO FILES IN /signalk-server-docker/**
 
-**LAST MODIFIED**: 2026-08-07
+**LAST MODIFIED**: 2026-08-08
 
 ## For agentic coding: use the HaLOS workspace
 
@@ -109,10 +109,9 @@ The published tag is `v<upstream version>-halos.<BUILD>`, e.g. `v2.30.0-halos.2`
 matching what `ghcr.io/hatlabs/homarr` publishes. The `-halos.` separator is the
 only thing that tells a consumer which half is upstream's and which is ours.
 
-Nothing parses it yet. `check-image-updates.sh` in `shared-workflows` strips a
-leading `v` and treats the rest as upstream's version, so it still has to be
-taught the split before it writes correct metadata for these tags
-(halos-marine-containers#212).
+`check-image-updates.sh` in `shared-workflows` splits these tags on `-halos.`, so
+the marine app's repin bot writes the half before it as `upstream_version` and
+our build revision does not leak into a field defined as upstream's.
 
 The version half is read from the base image's own installed
 `signalk-server/package.json` at build time -- **not** parsed out of `BASE`.
@@ -196,12 +195,32 @@ The detection is a script rather than a `./run` command because `run` is in
 build.yml's paths filter -- a command added there would put every merge touching
 it on the publish path, where it resolves an already published tag and fails.
 
-A PR opened with `GITHUB_TOKEN` raises no `pull_request` event, so build.yml
-would never run on it. The workflow therefore dispatches build.yml on the branch
-explicitly, `workflow_dispatch` being one of the two events that token may still
-trigger; that run builds and verifies without publishing, since the publish
-steps are gated on the event. Without it the PR would be an unevaluated bump,
-which is the one thing it exists to get evaluated.
+The PR is opened with the `BUMP_PAT` secret, not `GITHUB_TOKEN`. A PR opened
+with `GITHUB_TOKEN` raises no `pull_request` event, so build.yml would never
+attach a check to it -- the bump would arrive unevaluated, which is the one
+thing it exists to get evaluated. `BUMP_PAT` is a fine-grained token scoped to
+this repo alone with `Contents: write` and `Pull requests: write`; the workflow
+refuses to start without it rather than falling back, because the fallback opens
+a PR that merely *looks* fine, and an expired token would degrade to that
+silently.
+
+`main` carries a ruleset requiring the `build` check, pinned to the GitHub
+Actions integration so a status of that name from another source cannot satisfy
+it, with an empty `bypass_actors` and no force-push or deletion.
+
+Be precise about what that buys, because it is less than it looks. Required
+approvals are zero -- deliberately, since the end state is an unattended merge --
+and on a `pull_request` event the workflow producing the `build` check comes from
+the PR head, so a PR defines its own gate. What the ruleset guarantees is that a
+change to `main` arrived through a PR and that GitHub Actions reported `build` on
+it. It does **not** contain `BUMP_PAT`: that token holds `Contents: write` and
+`Pull requests: write`, which is everything needed to push a branch, make its own
+check green, and merge it. The credential is the trust boundary here, not the
+ruleset.
+
+Nothing in this repo asserts the ruleset still exists or still names `build`.
+Delete it and the daily bump PR still opens, still goes green, and merges with
+nothing required -- indistinguishable from a healthy PR.
 
 ## Changing the plugin set
 
