@@ -45,8 +45,9 @@ published image actually resolved to, `./run plugin-versions [image]`.
 A scheduled workflow checks daily whether upstream published a newer release of
 the image `BASE` pins, and opens a PR moving `BASE` to it and resetting `BUILD`
 to 1. The PR is opened with a repo-scoped token, so `build.yml` runs on it as an
-ordinary check and the bump arrives with the same verification a plugin change
-gets before anyone decides to merge it.
+ordinary check, and auto-merge lands it once that check is green — no human is
+in this path. The decision about whether an upstream release should reach a
+device is made later, at the repin in `halos-marine-containers`.
 
 ## Development notes
 

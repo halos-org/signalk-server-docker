@@ -15,6 +15,7 @@ concurrency:
 
 env:
   BRANCH: chore/update-base-image
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
 jobs:
   check:
@@ -62,29 +63,65 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Enabling auto-merge is per-PR state that can fail on its own: the
-          # call rejects a PR GitHub already considers mergeable, and races the
-          # mergeability computation right after creation. A non-zero exit is
-          # therefore not evidence of failure -- only the flag being absent
-          # afterwards is. Left unchecked, one bad call would strand the bump
-          # green and unmerged with every later run reporting success over it.
+          # checkout takes the dispatched ref, and the steps below rename that
+          # ref's tip to $BRANCH and force-push it. Dispatched from a feature
+          # branch that would publish the whole branch as a bump PR -- and now
+          # auto-merge it. Only the default branch may drive this.
+          [ "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH" ] || {
+            echo "::error::refusing to touch ${BRANCH} from ${GITHUB_REF_NAME}; this step only runs on ${DEFAULT_BRANCH}." >&2
+            exit 1
+          }
+
+          # Auto-merge only waits for something if a required check exists. With
+          # no ruleset the PR is mergeable the moment it opens, and gh merges it
+          # outright rather than arming it -- publishing a bump nothing built.
+          # The ruleset is repo settings, invisible to this repo, so assert it
+          # rather than assume it.
+          gh api "repos/${GITHUB_REPOSITORY}/rulesets" --jq '.[].id' \
+            | while read -r id; do
+                gh api "repos/${GITHUB_REPOSITORY}/rulesets/${id}"
+              done \
+            | jq -e -s 'any(.[];
+                  .enforcement == "active"
+                  and (.conditions.ref_name.include // [] | index("~DEFAULT_BRANCH"))
+                  and (.rules[] | select(.type == "required_status_checks")
+                       | .parameters.required_status_checks[]? | .context == "build"))' >/dev/null || {
+            echo "::error::No active ruleset requires the build check on the default branch. Auto-merge would land the bump unbuilt; refusing to arm." >&2
+            exit 1
+          }
+
+          # Arming is per-PR state that can fail on its own, and gh's exit status
+          # does not distinguish the failures from the no-ops. Only the flag
+          # being absent afterwards is evidence. The head SHA is pinned because
+          # gh drops --auto and merges outright when GitHub already considers the
+          # PR mergeable; without it that merge would take whatever the head is
+          # at that instant rather than the commit this run built.
           enable_auto_merge() {
-            local pr="$1" state
+            local pr="$1" head="$2" state err
             for _ in 1 2 3; do
-              gh pr merge "$pr" --auto --merge >/dev/null 2>&1 || true
+              err="$(gh pr merge "$pr" --auto --merge --match-head-commit "$head" 2>&1 >/dev/null)" || true
               state="$(gh pr view "$pr" --json state,autoMergeRequest \
-                       --jq 'if .autoMergeRequest then "armed" elif .state == "MERGED" then "merged" else "" end')"
-              if [ -n "$state" ]; then
-                echo "PR #${pr}: ${state}."
-                return 0
-              fi
+                       --jq 'if .autoMergeRequest then "armed"
+                             elif .state == "MERGED" then "merged"
+                             elif .state == "CLOSED" then "closed"
+                             else "" end')" || state=""
+              case "$state" in
+                armed|merged) echo "PR #${pr}: ${state}."; return 0 ;;
+                closed) echo "::error::PR #${pr} is closed; nothing to arm." >&2; return 1 ;;
+              esac
               sleep 5
             done
-            echo "::error::Could not enable auto-merge on #${pr}; the bump will sit unmerged." >&2
+            echo "::error::Could not arm auto-merge on #${pr}; the bump will sit unmerged. Last error: ${err}" >&2
             return 1
           }
 
-          existing="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          # --head matches a ref NAME across every fork, so on a public repo an
+          # open fork PR branched as $BRANCH would be selected here -- and then
+          # edited and auto-merged with our credential. Only a PR whose head is
+          # this repo counts.
+          existing="$(gh pr list --head "$BRANCH" --state open \
+                        --json number,isCrossRepository \
+                        --jq '[.[] | select(.isCrossRepository == false)] | .[0].number // empty')"
 
           # Re-pushing an unchanged bump every morning would restart its check,
           # so the branch is only touched when it does not already carry this
@@ -94,7 +131,7 @@ jobs:
           if [ -n "$existing" ] && git fetch --quiet origin "$BRANCH" 2>/dev/null &&
              git show FETCH_HEAD:build.env | diff -q - build.env >/dev/null 2>&1; then
             echo "PR #${existing} already carries this bump."
-            enable_auto_merge "$existing"
+            enable_auto_merge "$existing" "$(git rev-parse FETCH_HEAD)"
             exit 0
           fi
 
@@ -104,16 +141,22 @@ jobs:
           git add build.env
           git commit -m "chore: bump base image to ${NEW_BASE#*:}"
           git push --force origin "$BRANCH"
+          head="$(git rev-parse HEAD)"
 
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --body-file /tmp/pr_body.md
             pr="$existing"
             echo "Updated #${pr}"
           else
-            pr="$(gh pr create \
-                    --title "chore: bump base image to ${NEW_BASE#*:}" \
-                    --body-file /tmp/pr_body.md | grep -oE '[0-9]+$')"
+            gh pr create \
+              --title "chore: bump base image to ${NEW_BASE#*:}" \
+              --body-file /tmp/pr_body.md >/dev/null
+            # Same query as above rather than scraping gh's stdout, which is a
+            # display format with no stability promise.
+            pr="$(gh pr list --head "$BRANCH" --state open \
+                    --json number,isCrossRepository \
+                    --jq '[.[] | select(.isCrossRepository == false)] | .[0].number // empty')"
             echo "Opened #${pr}"
           fi
 
-          enable_auto_merge "$pr"
+          enable_auto_merge "$pr" "$head"
