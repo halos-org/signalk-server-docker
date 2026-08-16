@@ -2,7 +2,7 @@
 
 **THESE RULES ONLY APPLY TO FILES IN /signalk-server-docker/**
 
-**LAST MODIFIED**: 2026-08-08
+**LAST MODIFIED**: 2026-08-16
 
 ## For agentic coding: use the HaLOS workspace
 
@@ -164,8 +164,9 @@ Nothing else watches `BASE`. The marine app pins *our* image, so its daily image
 check follows our GHCR tags and never looks at upstream's.
 
 `check-upstream.yml` runs `.github/scripts/check-base-update.sh` daily: it lists
-every tag of the repository `BASE` names, keeps those shaped like the tag `BASE`
-pins, and opens a PR setting `BASE` to the newest of them and `BUILD` back to 1.
+the most recently pushed tags of the repository `BASE` names, keeps those shaped
+like the tag `BASE` pins, and opens a PR setting `BASE` to the newest of them and
+`BUILD` back to 1.
 
 The shape is derived from the pinned tag -- digit runs wildcarded, everything
 else literal -- so `-alpine-core`, `-beta.2`, two-component `v2.30-core` and the
@@ -177,13 +178,37 @@ the floor, so a tag upstream deletes cannot produce a downgrade.
 Only Docker Hub is queried; a `BASE` on any other registry exits non-zero rather
 than reporting up to date.
 
-Every page of the listing is read. Upstream has ~2500 tags, nearly all of them
-CI tags, so release tags sit at an arbitrary page -- the first page alone
-contains none of them, and a checker that stopped there would report "up to
-date" forever. The script fails rather than reporting calm when no tag matches
-the pinned shape, or when none of the matching tags appears to have an arm64
-image -- the pinned tag is the control there, since the build pulls it on every
-merge. This whole check exists because a silent gap went unnoticed.
+The listing is narrowed, then read to its end. Upstream carries ~2800 tags,
+nearly all of them per-commit CI tags, and Docker Hub refuses an anonymous
+request whose pagination offset reaches 1000 (`pagination offset too large for
+anonymous requests`) -- so the full listing is not reachable without a
+credential, and it has to be made smaller before it can be read whole.
+
+The narrowing is Docker Hub's `name` substring filter, given the longest literal
+run of the pinned tag -- the parts the shape pattern does not wildcard. Every
+name the pattern can match contains those literals, so a filter built from them
+cannot drop a candidate. For `v2.30.0-core` that literal is `-core`, and it takes
+2790 tags down to 294. It is a narrowing hint and not the matching rule: the
+pattern still decides what counts, so extra tags getting through changes nothing.
+
+Reading to the end is what makes the answer sound, and truncating is unsound in a
+way ordering does not fix. This listing is ordered by last-pushed time, which
+upstream can move by re-pushing any tag at any time. So no cut-off point within
+it can be shown to have every release above it -- not the pinned tag's position,
+which a re-push of the pin moves, and not an older release's position, which a
+re-push of that tag moves. Any check of the form "we looked far enough back
+because tag X is in view" is defeated by upstream re-pushing X.
+
+The script fails rather than reporting calm when the narrowed listing does not
+end within the anonymous budget, when the pinned tag has no literal to narrow by,
+when no tag matches the pinned shape, or when none of the matching tags appears
+to have an arm64 image -- the pinned tag is the control for the last two, since
+the build pulls it on every merge. This whole check exists because a silent gap
+went unnoticed.
+
+There is no automated test for any of this -- the detection has no seam to inject
+a listing through, which is issue #8. The guards were exercised by hand against
+the live listing.
 
 Note what is *not* used: the listing's per-image `status`. It reports pull
 recency, not existence -- it flips to `inactive` on a tag nobody has pulled for

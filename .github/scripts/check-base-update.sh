@@ -30,6 +30,7 @@ LATEST_BASE="$(python3 - "$BASE" <<'PYEOF'
 import json
 import re
 import sys
+import urllib.parse
 import urllib.request
 
 base = sys.argv[1]
@@ -55,21 +56,43 @@ pattern = re.compile(
 )
 
 
-def all_tags(path):
-    # Docker Hub caps page_size at 100 and this repository has thousands of
-    # tags, the vast majority of them per-commit CI tags. Release tags sit at an
-    # arbitrary page, so every page is read: a listing truncated at some page
-    # count would report "up to date" for a release it never looked at.
-    url = f"https://hub.docker.com/v2/repositories/{path}/tags?page_size=100"
-    pages = 0
-    while url:
-        if pages >= 100:
-            sys.exit(f"{path}: still paginating after {pages} pages; refusing to guess")
+# Docker Hub refuses an anonymous request whose pagination offset reaches 1000
+# ("pagination offset too large for anonymous requests; sign in to page
+# further"), so 100 x 10 is the whole anonymous budget, not a tuning choice.
+PAGE_SIZE = 100
+MAX_PAGES = 10
+
+# The pinned tag's literal runs -- the parts the shape pattern does not wildcard
+# -- appear in every name that pattern can match. So the longest of them is a
+# substring `every candidate contains`, and asking Docker Hub to return only
+# the tags containing it cannot drop one. For v2.30.0-core that is `-core`,
+# which is 294 of upstream's 2790 tags.
+#
+# This is a narrowing hint, not the matching rule: `pattern` still decides what
+# counts, so a filter that lets extra tags through changes nothing.
+NARROW = max(re.split(r"[0-9]+", tag), key=len)
+if not NARROW:
+    sys.exit(f"{tag} is all digits, so there is no literal to narrow the listing by; "
+             "the whole listing is not reachable without a credential")
+
+
+def matching_tags(path):
+    # Read the narrowed listing to its end. Truncating it would be unsound in a
+    # way no amount of ordering fixes: this listing is ordered by last-pushed
+    # time, which upstream can move by re-pushing any tag, so no cut-off point
+    # within it can be shown to have every release above it.
+    query = urllib.parse.urlencode({"page_size": PAGE_SIZE, "name": NARROW})
+    url = f"https://hub.docker.com/v2/repositories/{path}/tags?{query}"
+    entries = []
+    for _ in range(MAX_PAGES):
         with urllib.request.urlopen(url, timeout=30) as response:
             page = json.load(response)
-        yield from page.get("results", [])
+        entries += page.get("results", [])
         url = page.get("next")
-        pages += 1
+        if not url:
+            return entries
+    sys.exit(f"{path}: more than {PAGE_SIZE * MAX_PAGES} tags contain {NARROW!r}, so the listing "
+             "cannot be read to its end anonymously; narrowing it further needs a credential")
 
 
 def buildable(entry):
@@ -85,11 +108,18 @@ def buildable(entry):
     )
 
 
-shaped = [entry for entry in all_tags(path) if pattern.match(entry["name"])]
+def version(name):
+    # Every shaped name shares the pinned tag's literal skeleton, so comparing
+    # its digit runs is exact rather than a semver approximation.
+    return tuple(int(d) for d in re.findall(r"[0-9]+", name))
+
+
+scanned = matching_tags(path)
+shaped = [entry for entry in scanned if pattern.match(entry["name"])]
 if not shaped:
-    # The pinned tag matches its own pattern, so an empty result means the
-    # listing did not contain it: upstream restructured its tags or the API
-    # changed shape. Either way the answer is not "up to date".
+    # The pinned tag matches its own pattern and contains NARROW, so an empty
+    # result means the listing did not contain it: upstream restructured its tags
+    # or the API changed shape. Either way the answer is not "up to date".
     sys.exit(f"{path}: no tag matches the shape of {tag}; check upstream")
 
 candidates = [entry["name"] for entry in shaped if buildable(entry)]
@@ -100,14 +130,13 @@ if not candidates:
     # candidate list would otherwise collapse to the pinned tag and report calm.
     sys.exit(f"{path}: {len(shaped)} tags match the shape of {tag}, none with a linux/arm64 image; "
              "the listing or the filter is wrong, which is not the same as up to date")
-print(f"{path}: {len(shaped)} tags shaped like {tag}, {len(candidates)} with a linux/arm64 image",
+print(f"{path}: {len(scanned)} tags contain {NARROW!r}, {len(shaped)} shaped like {tag}, "
+      f"{len(candidates)} with a linux/arm64 image",
       file=sys.stderr)
 
-# Every candidate shares the pinned tag's literal skeleton, so ordering by its
-# digit runs is exact. The pinned tag is the floor whether or not it is still
-# listed, which is what makes a deleted or de-published tag unable to produce a
-# downgrade.
-newest = max(candidates + [tag], key=lambda name: tuple(int(d) for d in re.findall(r"[0-9]+", name)))
+# The pinned tag is the floor whether or not it is still listed, which is what
+# makes a deleted or de-published tag unable to produce a downgrade.
+newest = max(candidates + [tag], key=version)
 print(f"{repo}:{newest}")
 PYEOF
 )"
