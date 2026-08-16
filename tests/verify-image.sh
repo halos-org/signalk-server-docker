@@ -75,6 +75,14 @@ trap cleanup EXIT
 manifest_entries | grep -qxF 'signalk-to-influxdb2' ||
   die "signalk-to-influxdb2 is missing from ${MANIFEST} -- halos-marine-containers' prestart.sh writes its config unconditionally, so marine logging would stop with no other assertion failing"
 
+# Same failure mode, same silence: the prestart writes this plugin's config when
+# the QuestDB app is installed, and Signal K is told to make it the default
+# history provider. Drop the entry and the config addresses a plugin that is not
+# there -- history stops answering while the server, the database and every
+# assertion below stay healthy.
+manifest_entries | grep -qxF 'signalk-questdb-history-provider' ||
+  die "signalk-questdb-history-provider is missing from ${MANIFEST} -- halos-marine-containers' prestart.sh writes its config and points the history API at it, so history would stop with no other assertion failing"
+
 # The entrypoint hard-codes --securityenabled, so the module listings are 401
 # without a bootstrapped admin. Seed the shape halos-marine-containers'
 # prestart.sh writes, then log in for a token.
