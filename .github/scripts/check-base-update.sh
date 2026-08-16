@@ -55,21 +55,32 @@ pattern = re.compile(
 )
 
 
-def all_tags(path):
-    # Docker Hub caps page_size at 100 and this repository has thousands of
-    # tags, the vast majority of them per-commit CI tags. Release tags sit at an
-    # arbitrary page, so every page is read: a listing truncated at some page
-    # count would report "up to date" for a release it never looked at.
-    url = f"https://hub.docker.com/v2/repositories/{path}/tags?page_size=100"
-    pages = 0
-    while url:
-        if pages >= 100:
-            sys.exit(f"{path}: still paginating after {pages} pages; refusing to guess")
+# Docker Hub refuses an anonymous request whose pagination offset reaches 1000
+# ("pagination offset too large for anonymous requests; sign in to page
+# further"), so 100 x 10 is the whole anonymous budget, not a tuning choice.
+PAGE_SIZE = 100
+MAX_PAGES = 10
+
+
+def newest_tags(path):
+    # `ordering=last_updated` is newest first. Docker Hub inverts the usual sign
+    # convention -- `-last_updated` is the *ascending* one -- so the sign here is
+    # deliberate and not a typo. It is passed explicitly rather than relying on
+    # this also being the default order.
+    #
+    # Reading a fixed newest-first window rather than stopping at the pinned tag
+    # is what makes upstream re-pushing an old tag harmless: a re-push moves that
+    # tag to the top of the listing, and a walk that stopped there would skip
+    # every release below it.
+    url = (f"https://hub.docker.com/v2/repositories/{path}/tags"
+           f"?page_size={PAGE_SIZE}&ordering=last_updated")
+    for _ in range(MAX_PAGES):
         with urllib.request.urlopen(url, timeout=30) as response:
             page = json.load(response)
         yield from page.get("results", [])
         url = page.get("next")
-        pages += 1
+        if not url:
+            return
 
 
 def buildable(entry):
@@ -85,12 +96,22 @@ def buildable(entry):
     )
 
 
-shaped = [entry for entry in all_tags(path) if pattern.match(entry["name"])]
-if not shaped:
-    # The pinned tag matches its own pattern, so an empty result means the
-    # listing did not contain it: upstream restructured its tags or the API
-    # changed shape. Either way the answer is not "up to date".
-    sys.exit(f"{path}: no tag matches the shape of {tag}; check upstream")
+scanned = list(newest_tags(path))
+shaped = [entry for entry in scanned if pattern.match(entry["name"])]
+
+# Finding the pinned tag inside a newest-first window is what proves the window
+# reached far enough back: every tag pushed at or after it was examined, so a
+# release the window did not contain cannot exist. Without this the check would
+# be a guess about how deep releases sit.
+#
+# It also fails the two ways this can silently go wrong. If the ordering ever
+# stops being newest-first, the window fills with ancient tags and the pin is not
+# in it. If upstream leaves BASE unbumped long enough for PAGE_SIZE * MAX_PAGES
+# CI tags to accumulate past it, the window no longer reaches the pin -- and the
+# answer then is "look at this", not "up to date".
+if not any(entry["name"] == tag for entry in shaped):
+    sys.exit(f"{path}: {tag} is not among the {len(scanned)} most recently pushed tags; "
+             "the listing order changed, or the pin is too old to reach anonymously")
 
 candidates = [entry["name"] for entry in shaped if buildable(entry)]
 if not candidates:
@@ -100,7 +121,8 @@ if not candidates:
     # candidate list would otherwise collapse to the pinned tag and report calm.
     sys.exit(f"{path}: {len(shaped)} tags match the shape of {tag}, none with a linux/arm64 image; "
              "the listing or the filter is wrong, which is not the same as up to date")
-print(f"{path}: {len(shaped)} tags shaped like {tag}, {len(candidates)} with a linux/arm64 image",
+print(f"{path}: scanned the {len(scanned)} most recently pushed tags, "
+      f"{len(shaped)} shaped like {tag}, {len(candidates)} with a linux/arm64 image",
       file=sys.stderr)
 
 # Every candidate shares the pinned tag's literal skeleton, so ordering by its
