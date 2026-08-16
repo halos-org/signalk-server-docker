@@ -30,6 +30,7 @@ LATEST_BASE="$(python3 - "$BASE" <<'PYEOF'
 import json
 import re
 import sys
+import urllib.parse
 import urllib.request
 
 base = sys.argv[1]
@@ -61,25 +62,37 @@ pattern = re.compile(
 PAGE_SIZE = 100
 MAX_PAGES = 10
 
+# The pinned tag's literal runs -- the parts the shape pattern does not wildcard
+# -- appear in every name that pattern can match. So the longest of them is a
+# substring `every candidate contains`, and asking Docker Hub to return only
+# the tags containing it cannot drop one. For v2.30.0-core that is `-core`,
+# which is 294 of upstream's 2790 tags.
+#
+# This is a narrowing hint, not the matching rule: `pattern` still decides what
+# counts, so a filter that lets extra tags through changes nothing.
+NARROW = max(re.split(r"[0-9]+", tag), key=len)
+if not NARROW:
+    sys.exit(f"{tag} is all digits, so there is no literal to narrow the listing by; "
+             "the whole listing is not reachable without a credential")
 
-def newest_tags(path):
-    # `ordering=last_updated` is newest first. Docker Hub inverts the usual sign
-    # convention -- `-last_updated` is the *ascending* one -- so the sign here is
-    # deliberate and not a typo. It is passed explicitly rather than relying on
-    # this also being the default order.
-    #
-    # The window is a fixed size rather than a walk that stops at the pinned tag,
-    # because a re-push moves that tag to the top of the listing and a walk that
-    # stopped there would skip every release below it.
-    url = (f"https://hub.docker.com/v2/repositories/{path}/tags"
-           f"?page_size={PAGE_SIZE}&ordering=last_updated")
+
+def matching_tags(path):
+    # Read the narrowed listing to its end. Truncating it would be unsound in a
+    # way no amount of ordering fixes: this listing is ordered by last-pushed
+    # time, which upstream can move by re-pushing any tag, so no cut-off point
+    # within it can be shown to have every release above it.
+    query = urllib.parse.urlencode({"page_size": PAGE_SIZE, "name": NARROW})
+    url = f"https://hub.docker.com/v2/repositories/{path}/tags?{query}"
+    entries = []
     for _ in range(MAX_PAGES):
         with urllib.request.urlopen(url, timeout=30) as response:
             page = json.load(response)
-        yield from page.get("results", [])
+        entries += page.get("results", [])
         url = page.get("next")
         if not url:
-            return
+            return entries
+    sys.exit(f"{path}: more than {PAGE_SIZE * MAX_PAGES} tags contain {NARROW!r}, so the listing "
+             "cannot be read to its end anonymously; narrowing it further needs a credential")
 
 
 def buildable(entry):
@@ -101,31 +114,13 @@ def version(name):
     return tuple(int(d) for d in re.findall(r"[0-9]+", name))
 
 
-scanned = list(newest_tags(path))
+scanned = matching_tags(path)
 shaped = [entry for entry in scanned if pattern.match(entry["name"])]
-older = [entry["name"] for entry in shaped if version(entry["name"]) < version(tag)]
-
-# What a truncated window has to establish is coverage: that it reaches back past
-# the pin's own release, so no newer release can sit below it. Finding the *pin*
-# in the window does not establish that, because a tag's position here is its
-# last-pushed time, which upstream can move. Re-push the pinned tag and it
-# reappears at the top however old its release is, vouching for a window that may
-# no longer reach the releases after it.
-#
-# A release older in version than the pin is the anchor instead. Upstream
-# publishes releases in ascending version order, so anything newer than the pin
-# was pushed after that anchor; the window is contiguous and newest first, so
-# everything pushed after the anchor is inside it. Nothing upstream does to the
-# pin moves the anchor.
-#
-# This also fails on a listing that stops being newest first, which fills the
-# window with tags too old to contain any shaped release at all.
-# A window that ran out of pages before it ran out of budget is the whole
-# listing, and needs no anchor.
-if not older and len(scanned) >= PAGE_SIZE * MAX_PAGES:
-    sys.exit(f"{path}: the {len(scanned)} most recently pushed tags contain no release older than "
-             f"{tag}, so they cannot be shown to contain every release newer than it; "
-             "the listing order changed, or the pin is too old to reach anonymously")
+if not shaped:
+    # The pinned tag matches its own pattern and contains NARROW, so an empty
+    # result means the listing did not contain it: upstream restructured its tags
+    # or the API changed shape. Either way the answer is not "up to date".
+    sys.exit(f"{path}: no tag matches the shape of {tag}; check upstream")
 
 candidates = [entry["name"] for entry in shaped if buildable(entry)]
 if not candidates:
@@ -135,8 +130,8 @@ if not candidates:
     # candidate list would otherwise collapse to the pinned tag and report calm.
     sys.exit(f"{path}: {len(shaped)} tags match the shape of {tag}, none with a linux/arm64 image; "
              "the listing or the filter is wrong, which is not the same as up to date")
-print(f"{path}: scanned the {len(scanned)} most recently pushed tags, "
-      f"{len(shaped)} shaped like {tag}, {len(candidates)} with a linux/arm64 image",
+print(f"{path}: {len(scanned)} tags contain {NARROW!r}, {len(shaped)} shaped like {tag}, "
+      f"{len(candidates)} with a linux/arm64 image",
       file=sys.stderr)
 
 # The pinned tag is the floor whether or not it is still listed, which is what

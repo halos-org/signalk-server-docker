@@ -178,43 +178,33 @@ the floor, so a tag upstream deletes cannot produce a downgrade.
 Only Docker Hub is queried; a `BASE` on any other registry exits non-zero rather
 than reporting up to date.
 
-The listing is read newest first, and only the newest 1000 tags. Both halves of
-that are forced by Docker Hub: an anonymous request whose pagination offset
-reaches 1000 is refused outright (`pagination offset too large for anonymous
-requests`), and upstream carries ~2800 tags, nearly all of them per-commit CI
-tags. So the whole listing is not reachable without a credential, and reading it
-was never necessary anyway.
+The listing is narrowed, then read to its end. Upstream carries ~2800 tags,
+nearly all of them per-commit CI tags, and Docker Hub refuses an anonymous
+request whose pagination offset reaches 1000 (`pagination offset too large for
+anonymous requests`) -- so the full listing is not reachable without a
+credential, and it has to be made smaller before it can be read whole.
 
-Order with `ordering=last_updated`, which is Docker Hub's **descending** sense --
-`-last_updated` is the ascending one, the opposite of the usual convention. Pass
-it explicitly rather than relying on this also being the default.
+The narrowing is Docker Hub's `name` substring filter, given the longest literal
+run of the pinned tag -- the parts the shape pattern does not wildcard. Every
+name the pattern can match contains those literals, so a filter built from them
+cannot drop a candidate. For `v2.30.0-core` that literal is `-core`, and it takes
+2790 tags down to 294. It is a narrowing hint and not the matching rule: the
+pattern still decides what counts, so extra tags getting through changes nothing.
 
-What a truncated window has to establish is **coverage**: that it reaches back
-past the pin's own release, so no newer release can sit below it. The window
-must therefore contain a release *older in version* than the pin, and that tag
-is the anchor. Upstream publishes releases in ascending version order, so
-anything newer than the pin was pushed after the anchor; the window is
-contiguous and newest first, so everything pushed after the anchor is inside it.
+Reading to the end is what makes the answer sound, and truncating is unsound in a
+way ordering does not fix. This listing is ordered by last-pushed time, which
+upstream can move by re-pushing any tag at any time. So no cut-off point within
+it can be shown to have every release above it -- not the pinned tag's position,
+which a re-push of the pin moves, and not an older release's position, which a
+re-push of that tag moves. Any check of the form "we looked far enough back
+because tag X is in view" is defeated by upstream re-pushing X.
 
-Note what is **not** the test: finding the pinned tag itself. A tag's position
-in this listing is its last-pushed time, which upstream can move. Re-push the
-pinned tag and it reappears at the top however old its release is, vouching for
-a window that may no longer reach the releases after it -- and the check would
-then select the pin and report up to date. The anchor is immune, because nothing
-upstream does to the pin moves a different, older tag.
-
-The window is a fixed size rather than a walk that stops at the pin, for the same
-reason: a re-push moves the pin to the top, and a walk that stopped there would
-skip every release below it.
-
-The script fails rather than reporting calm when the window contains no release
-older than the pin, when no tag matches the pinned shape, or when none of the
-matching tags appears to have an arm64 image -- the pinned tag is the control for
-the last two, since the build pulls it on every merge. The first covers both ways
-the window can go wrong: the ordering ceasing to be newest-first, which fills the
-window with tags too old to contain any shaped release at all, and `BASE` sitting
-unbumped long enough for 1000 CI tags to accumulate past its release. This whole
-check exists because a silent gap went unnoticed.
+The script fails rather than reporting calm when the narrowed listing does not
+end within the anonymous budget, when the pinned tag has no literal to narrow by,
+when no tag matches the pinned shape, or when none of the matching tags appears
+to have an arm64 image -- the pinned tag is the control for the last two, since
+the build pulls it on every merge. This whole check exists because a silent gap
+went unnoticed.
 
 There is no automated test for any of this -- the detection has no seam to inject
 a listing through, which is issue #8. The guards were exercised by hand against
