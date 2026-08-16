@@ -40,8 +40,9 @@ signalk-anchoralarm-plugin
 # Sensors / misc
 signalk-flags
 
-# Logging (configured with the InfluxDB token by prestart)
+# Logging (both configured by halos-marine-containers' prestart)
 signalk-to-influxdb2
+signalk-questdb-history-provider
 
 # Automation
 @signalk/signalk-node-red
