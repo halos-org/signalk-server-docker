@@ -189,23 +189,36 @@ Order with `ordering=last_updated`, which is Docker Hub's **descending** sense -
 `-last_updated` is the ascending one, the opposite of the usual convention. Pass
 it explicitly rather than relying on this also being the default.
 
-What makes a truncated window sound is that the pinned tag has to appear inside
-it. That is a proof, not a sanity check: in a newest-first listing containing the
-pin, every tag pushed at or after the pin was examined, so a release the window
-missed cannot exist. Absent that, the depth would be a guess about how deep
-releases sit.
+What a truncated window has to establish is **coverage**: that it reaches back
+past the pin's own release, so no newer release can sit below it. The window
+must therefore contain a release *older in version* than the pin, and that tag
+is the anchor. Upstream publishes releases in ascending version order, so
+anything newer than the pin was pushed after the anchor; the window is
+contiguous and newest first, so everything pushed after the anchor is inside it.
 
-The window is fixed rather than stopped at the pin, because upstream re-pushing
-an old tag moves it to the top of the listing -- and a walk that stopped there
-would skip every release below it.
+Note what is **not** the test: finding the pinned tag itself. A tag's position
+in this listing is its last-pushed time, which upstream can move. Re-push the
+pinned tag and it reappears at the top however old its release is, vouching for
+a window that may no longer reach the releases after it -- and the check would
+then select the pin and report up to date. The anchor is immune, because nothing
+upstream does to the pin moves a different, older tag.
 
-The script fails rather than reporting calm when the pinned tag is not in the
-window, when no tag matches the pinned shape, or when none of the matching tags
-appears to have an arm64 image -- the pinned tag is the control for the last two,
-since the build pulls it on every merge. The first covers both ways the window
-can go wrong: the ordering ceasing to be newest-first, and `BASE` sitting
-unbumped long enough for 1000 CI tags to accumulate past it. This whole check
-exists because a silent gap went unnoticed.
+The window is a fixed size rather than a walk that stops at the pin, for the same
+reason: a re-push moves the pin to the top, and a walk that stopped there would
+skip every release below it.
+
+The script fails rather than reporting calm when the window contains no release
+older than the pin, when no tag matches the pinned shape, or when none of the
+matching tags appears to have an arm64 image -- the pinned tag is the control for
+the last two, since the build pulls it on every merge. The first covers both ways
+the window can go wrong: the ordering ceasing to be newest-first, which fills the
+window with tags too old to contain any shaped release at all, and `BASE` sitting
+unbumped long enough for 1000 CI tags to accumulate past its release. This whole
+check exists because a silent gap went unnoticed.
+
+There is no automated test for any of this -- the detection has no seam to inject
+a listing through, which is issue #8. The guards were exercised by hand against
+the live listing.
 
 Note what is *not* used: the listing's per-image `status`. It reports pull
 recency, not existence -- it flips to `inactive` on a tag nobody has pulled for

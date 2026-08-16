@@ -68,10 +68,9 @@ def newest_tags(path):
     # deliberate and not a typo. It is passed explicitly rather than relying on
     # this also being the default order.
     #
-    # Reading a fixed newest-first window rather than stopping at the pinned tag
-    # is what makes upstream re-pushing an old tag harmless: a re-push moves that
-    # tag to the top of the listing, and a walk that stopped there would skip
-    # every release below it.
+    # The window is a fixed size rather than a walk that stops at the pinned tag,
+    # because a re-push moves that tag to the top of the listing and a walk that
+    # stopped there would skip every release below it.
     url = (f"https://hub.docker.com/v2/repositories/{path}/tags"
            f"?page_size={PAGE_SIZE}&ordering=last_updated")
     for _ in range(MAX_PAGES):
@@ -96,21 +95,36 @@ def buildable(entry):
     )
 
 
+def version(name):
+    # Every shaped name shares the pinned tag's literal skeleton, so comparing
+    # its digit runs is exact rather than a semver approximation.
+    return tuple(int(d) for d in re.findall(r"[0-9]+", name))
+
+
 scanned = list(newest_tags(path))
 shaped = [entry for entry in scanned if pattern.match(entry["name"])]
+older = [entry["name"] for entry in shaped if version(entry["name"]) < version(tag)]
 
-# Finding the pinned tag inside a newest-first window is what proves the window
-# reached far enough back: every tag pushed at or after it was examined, so a
-# release the window did not contain cannot exist. Without this the check would
-# be a guess about how deep releases sit.
+# What a truncated window has to establish is coverage: that it reaches back past
+# the pin's own release, so no newer release can sit below it. Finding the *pin*
+# in the window does not establish that, because a tag's position here is its
+# last-pushed time, which upstream can move. Re-push the pinned tag and it
+# reappears at the top however old its release is, vouching for a window that may
+# no longer reach the releases after it.
 #
-# It also fails the two ways this can silently go wrong. If the ordering ever
-# stops being newest-first, the window fills with ancient tags and the pin is not
-# in it. If upstream leaves BASE unbumped long enough for PAGE_SIZE * MAX_PAGES
-# CI tags to accumulate past it, the window no longer reaches the pin -- and the
-# answer then is "look at this", not "up to date".
-if not any(entry["name"] == tag for entry in shaped):
-    sys.exit(f"{path}: {tag} is not among the {len(scanned)} most recently pushed tags; "
+# A release older in version than the pin is the anchor instead. Upstream
+# publishes releases in ascending version order, so anything newer than the pin
+# was pushed after that anchor; the window is contiguous and newest first, so
+# everything pushed after the anchor is inside it. Nothing upstream does to the
+# pin moves the anchor.
+#
+# This also fails on a listing that stops being newest first, which fills the
+# window with tags too old to contain any shaped release at all.
+# A window that ran out of pages before it ran out of budget is the whole
+# listing, and needs no anchor.
+if not older and len(scanned) >= PAGE_SIZE * MAX_PAGES:
+    sys.exit(f"{path}: the {len(scanned)} most recently pushed tags contain no release older than "
+             f"{tag}, so they cannot be shown to contain every release newer than it; "
              "the listing order changed, or the pin is too old to reach anonymously")
 
 candidates = [entry["name"] for entry in shaped if buildable(entry)]
@@ -125,11 +139,9 @@ print(f"{path}: scanned the {len(scanned)} most recently pushed tags, "
       f"{len(shaped)} shaped like {tag}, {len(candidates)} with a linux/arm64 image",
       file=sys.stderr)
 
-# Every candidate shares the pinned tag's literal skeleton, so ordering by its
-# digit runs is exact. The pinned tag is the floor whether or not it is still
-# listed, which is what makes a deleted or de-published tag unable to produce a
-# downgrade.
-newest = max(candidates + [tag], key=lambda name: tuple(int(d) for d in re.findall(r"[0-9]+", name)))
+# The pinned tag is the floor whether or not it is still listed, which is what
+# makes a deleted or de-published tag unable to produce a downgrade.
+newest = max(candidates + [tag], key=version)
 print(f"{repo}:{newest}")
 PYEOF
 )"
