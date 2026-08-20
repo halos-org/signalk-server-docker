@@ -56,8 +56,9 @@ jobs:
           . ./build.env
           docker pull -q "$BASE"
           tag="$(./run version | head -1)"
-          echo "base=$BASE" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag"   >> "$GITHUB_OUTPUT"
+          echo "base=$BASE"   >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"     >> "$GITHUB_OUTPUT"
           echo "Base:      $BASE"
           echo "Publishes: $tag"
 
@@ -102,7 +103,9 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          build-args: BASE=${{ steps.tag.outputs.base }}
+          build-args: |
+            BASE=${{ steps.tag.outputs.base }}
+            BUILD=${{ steps.tag.outputs.build }}
           load: true
           push: false
           tags: candidate:${{ github.sha }}

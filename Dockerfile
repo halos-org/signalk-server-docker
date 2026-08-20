@@ -17,6 +17,20 @@ WORKDIR /staging
 
 COPY --chown=node:node plugins.list .
 
+# Our build revision, read by the resolve below so that incrementing it
+# re-resolves the manifest.
+#
+# CI builds with a BuildKit layer cache. Nothing here is pinned, so with an
+# unchanged plugins.list the install below is a cache hit and every version it
+# resolved stays frozen at whatever the cache was first populated with -- while
+# `./run version` reports a new tag and CI publishes it. Measured on
+# v2.31.1-halos.2: signalk-questdb-history-provider 1.0.0, four days after
+# 1.10.0 reached npm and hours after 2.0.0 did.
+#
+# The value is substituted into the RUN below, which is what puts it in the
+# layer's cache key. Reading it only through the environment would not.
+ARG BUILD
+
 # --install-strategy=nested keeps every transitive dependency under the package
 # that needs it, leaving only the manifest's own entries at the staging root.
 # This is load-bearing, not a preference: a hoisted install puts ~380 packages at
@@ -36,7 +50,9 @@ COPY --chown=node:node plugins.list .
 # Comments are stripped only at line start: an npm spec may legitimately contain
 # '#' (github:org/repo#ref), and a mid-line strip would silently install the
 # default branch instead of the pinned ref.
-RUN npm init -y >/dev/null \
+RUN [ -n "${BUILD}" ] || { echo "BUILD build-arg is required; see build.env" >&2; exit 1; }; \
+    echo "resolving the curated set for build revision ${BUILD}" \
+ && npm init -y >/dev/null \
  && sed -e 's/^[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' plugins.list | tr -d '\r' \
       | xargs npm install --install-strategy=nested --ignore-scripts --no-audit --no-fund \
  && rm package.json package-lock.json

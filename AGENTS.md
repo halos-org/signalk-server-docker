@@ -123,6 +123,10 @@ upstream bump does not touch it.
   check, see *Watching upstream*
 - Plugin change or rebuild: increment `BUILD`
 
+`BUILD` reaches the build as a build-arg, and the dependency-resolving layer
+reads it. That is what makes incrementing it re-resolve rather than replay a
+cached install -- see *Plugin versions are not pinned*.
+
 `./run version` prints what the current `build.env` would publish, without
 building anything.
 
@@ -146,6 +150,16 @@ Deliberately, matching upstream: `docker/Dockerfile_rel` runs
 `npm install signalk-server@$TAG` with no lockfile, and its bundled plugins are
 semver ranges (`^4.0.0`, `0.x`). Our curated set resolves the same way, so a
 baked plugin and a fresh app-store install agree.
+
+Unpinned resolution and a layer cache do not combine on their own. CI builds with
+`cache-from: type=gha`, and with `plugins.list` unchanged the install layer is a
+cache hit, so every version stays frozen at whatever the cache first resolved --
+while `./run version` reports a new tag and CI publishes it. `v2.31.1-halos.1`
+and `-halos.2` are the same content for that reason: the second was cut to pick
+up `signalk-questdb-history-provider` 2.0.0 and baked 1.0.0, four days after
+1.10.0 reached npm. `BUILD` is now a build-arg the resolve layer reads, so a
+`BUILD` increment misses the cache by construction. Read the *Record resolved
+plugin versions* step, not the tag, to know what a build actually took.
 
 The cost is that a published tag's contents are not recorded in the repo. That is
 recoverable from the artifact itself -- every package's `package.json` ships in

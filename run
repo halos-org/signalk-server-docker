@@ -60,7 +60,7 @@ function build {
   #@ Category: Image
   local tag
   tag="${IMAGE_NAME}:$(version)"
-  docker build --build-arg "BASE=${BASE}" -t "${tag}" "$@" .
+  docker build --build-arg "BASE=${BASE}" --build-arg "BUILD=${BUILD}" -t "${tag}" "$@" .
   echo "Built ${tag}"
 }
 
