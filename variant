@@ -1,0 +1,462 @@
+#!/usr/bin/env bash
+#
+# usage: ./variant command [argument ...]
+#
+# Build Signal K server variant images from a signalk-server checkout and run
+# them on a HaLOS device in place of the stock image. Development tooling only:
+# nothing here is built or published by CI.
+#
+# Kept out of ./run on purpose: run is in build.yml's push paths filter, so a
+# merge touching it resolves the already-published tag and fails the publish
+# guard. See AGENTS.md, "Variant images".
+#
+
+set -o nounset
+set -o pipefail
+set -o errexit
+
+# Change the current directory to the project root.
+cd "$(dirname "$0")"
+
+# The localhost/ prefix names no registry anyone serves, so an image missing
+# from a device makes `docker compose up` fail instead of pulling a stranger.
+readonly REPO="localhost/signalk-server"
+readonly SRC_REPO="localhost/signalk-server-src"
+
+# What upstream's release workflow passes when building the published -core
+# images; docker/Dockerfile's own default BASE_IMAGE is the Node 22 base.
+readonly UPSTREAM_REGISTRY="cr.signalk.io"
+readonly UPSTREAM_BASE_IMAGE="24.04-24.x"
+
+readonly MAX_TAG_LENGTH=128
+
+function die {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+# <branch-slug>-<short-sha>, valid as a Docker tag.
+function variant_name {
+  local checkout="$1" branch sha slug
+  branch=$(git -C "$checkout" symbolic-ref --short -q HEAD || echo detached)
+  sha=$(git -C "$checkout" rev-parse --short HEAD)
+  slug="${branch//[^A-Za-z0-9_.-]/-}"
+  slug="${slug:0:$((MAX_TAG_LENGTH - ${#sha} - 1))}"
+  echo "${slug}-${sha}"
+}
+
+# name@version for each plugins.list entry, as resolved into the image.
+function curated_versions {
+  local image="$1" entries
+  entries=$(sed -e 's/^[[:space:]]*#.*//' -e '/^[[:space:]]*$/d' plugins.list | tr -d '\r' | sort -u)
+  # shellcheck disable=SC2086 # one argument per manifest entry
+  docker run --rm --entrypoint node "${image}" -e '
+    const root = "/home/node/signalk/node_modules/signalk-server/node_modules/";
+    console.log(process.argv.slice(1).map(p => p + "@" + require(root + p + "/package.json").version).join(" "));
+  ' ${entries}
+}
+
+################################################################################
+# Remote side
+#
+# Every device step runs as a bash script over ssh. The device login shell is
+# fish, which rejects inline bash, so scripts go through `bash -s` on stdin.
+
+REMOTE_PRELUDE="VARIANT_REPO=${REPO}"$'\n'
+REMOTE_PRELUDE+=$(cat <<'PRELUDE'
+set -o errexit -o nounset -o pipefail
+APP=/var/lib/container-apps/marine-signalk-server-container
+COMPOSE="$APP/docker-compose.yml"
+DATA="$APP/data/data"
+UNIT=marine-signalk-server-container.service
+CONTAINER=signalk-server
+STATE="$HOME/signalk-variants"
+SNAPSHOTS="$STATE/snapshots"
+READY_URL=http://localhost:3000/signalk
+READY_TRIES=60
+READY_INTERVAL=3
+
+if [ ! -f "$COMPOSE" ]; then
+  echo "No Signal K container app at $APP on $(hostname)." >&2
+  exit 1
+fi
+
+if docker info >/dev/null 2>&1; then
+  docker() { command docker "$@"; }
+else
+  docker() { sudo docker "$@"; }
+fi
+
+compose_image() {
+  local n
+  n=$(grep -c '^[[:space:]]*image:' "$COMPOSE" || true)
+  if [ "$n" != 1 ]; then
+    echo "Expected one image: line in $COMPOSE, found $n." >&2
+    return 1
+  fi
+  sed -n 's/^[[:space:]]*image:[[:space:]]*//p' "$COMPOSE"
+}
+
+is_variant() { case "$1" in "$VARIANT_REPO":*) return 0 ;; *) return 1 ;; esac; }
+
+short_name() { if is_variant "$1"; then echo "${1#"$VARIANT_REPO":}"; else echo stock; fi; }
+
+# Config and small plugin state (resources-provider keeps routes there). Left
+# out: plugin code (node_modules, system-plugins), caches, and the DuckDB
+# history store, which is hundreds of MB on a device that has been running.
+snapshot() {
+  local archive
+  mkdir -p "$SNAPSHOTS"
+  archive="$SNAPSHOTS/config-$(date +%Y%m%d-%H%M%S)_$1.tar.gz"
+  sudo tar -czf "$archive" -C "$DATA" \
+    --exclude=./node_modules --exclude=./system-plugins --exclude=./appstore-cache \
+    --exclude=./plugin-config-data/signalk-duckdb-history-provider .
+  sudo chown "$(id -u):$(id -g)" "$archive"
+  echo "  config snapshot: $archive ($(du -h "$archive" | cut -f1))"
+}
+
+wait_ready() {
+  local _
+  for _ in $(seq 1 "$READY_TRIES"); do
+    curl -sf --max-time 5 "$READY_URL" >/dev/null 2>&1 && return 0
+    sleep "$READY_INTERVAL"
+  done
+  return 1
+}
+
+# Point the compose file at $1, restart through systemd, and prove the running
+# container is $1. $2 is the expected image ID, or empty to compare by name.
+switch_to() {
+  local image="$1" want_id="$2" current got
+  current=$(compose_image)
+  snapshot "$(short_name "$current")-to-$(short_name "$image")"
+  # While the compose file names a variant, no package upgrade has happened
+  # since this was saved: an upgrade rewrites the file back to stock.
+  if ! is_variant "$current"; then
+    mkdir -p "$STATE"
+    printf '%s\n' "$current" > "$STATE/stock-image"
+  fi
+  sudo sed -i "s|^\([[:space:]]*image:[[:space:]]*\).*|\1$image|" "$COMPOSE"
+  # Repeated switches can trip the unit's start limit, which restart refuses.
+  sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
+  echo "  restarting $UNIT ..."
+  sudo systemctl restart "$UNIT"
+  if ! wait_ready; then
+    echo "FAIL: Signal K did not answer $READY_URL within $((READY_TRIES * READY_INTERVAL)) s." >&2
+    echo "      $COMPOSE now names $image." >&2
+    exit 1
+  fi
+  if [ -n "$want_id" ]; then
+    got=$(docker inspect -f '{{.Image}}' "$CONTAINER")
+    if [ "$got" != "$want_id" ]; then
+      echo "FAIL: $CONTAINER runs image $got, expected $want_id ($image)." >&2
+      exit 1
+    fi
+  else
+    got=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER")
+    if [ "$got" != "$image" ]; then
+      echo "FAIL: $CONTAINER runs $got, expected $image." >&2
+      exit 1
+    fi
+  fi
+  echo "  OK: $CONTAINER is running $image"
+}
+PRELUDE
+)
+readonly REMOTE_PRELUDE
+
+# Run the script on stdin on <host>, after the prelude. Extra arguments become
+# $1.. there; they must not contain whitespace (ssh re-joins them for fish).
+function on_host {
+  local host="$1"
+  shift
+  { printf '%s\n' "$REMOTE_PRELUDE"; cat; } | ssh "$host" bash -s -- "$@"
+}
+
+function require_host {
+  [[ -n "${1:-}" ]] || die "missing <host> argument (e.g. my-boat.local)"
+}
+
+################################################################################
+# Build Commands
+
+function build {
+  #@ Build a variant image: build <signalk-server checkout> [--no-verify]
+  #@ Category: Build
+  local checkout="${1:-}" verify=1
+  [[ -n "$checkout" ]] || die "usage: ./variant build <signalk-server checkout> [--no-verify]"
+  [[ "${2:-}" == "--no-verify" ]] && verify=0
+  checkout=$(cd "$checkout" && pwd)
+  [[ -f "$checkout/docker/Dockerfile" ]] || die "$checkout has no docker/Dockerfile; is it a signalk-server checkout?"
+  # The image name and labels claim a commit; uncommitted changes would make them lie.
+  [[ -z "$(git -C "$checkout" status --porcelain)" ]] || die "$checkout has uncommitted changes; commit them first"
+
+  local name branch revision src image ctx
+  name=$(variant_name "$checkout")
+  branch=$(git -C "$checkout" symbolic-ref --short -q HEAD || echo detached)
+  revision=$(git -C "$checkout" rev-parse HEAD)
+  src="${SRC_REPO}:${name}"
+  image="${REPO}:${name}"
+
+  # A private build context: the checkout root may hold stale gitignored *.tgz
+  # files, and docker/Dockerfile copies every *.tgz and expects exactly one
+  # signalk-server-<version>.tgz among them.
+  ctx=$(mktemp -d)
+  # shellcheck disable=SC2064 # expand now; ctx is local
+  trap "rm -rf '$ctx'" EXIT
+
+  echo "==> Packing ${branch} @ ${revision:0:12} (the tarball steps of upstream's build-docker.yml)"
+  (
+    cd "$checkout"
+    npm install
+    npm run build:all
+    npm pack --workspaces --pack-destination "$ctx"
+    npm pack --pack-destination "$ctx"
+  )
+  rm -f "$ctx"/signalk-typedoc-signalk-theme*.tgz
+  cp -R "$checkout/docker" "$ctx/docker"
+
+  echo "==> Building ${src} (upstream docker/Dockerfile, core edition)"
+  docker build \
+    --build-arg "REGISTRY=${UPSTREAM_REGISTRY}" \
+    --build-arg "BASE_IMAGE=${UPSTREAM_BASE_IMAGE}" \
+    --build-arg EDITION=core \
+    -f "$ctx/docker/Dockerfile" -t "$src" "$ctx"
+
+  echo "==> Building ${image} (curated plugin layer on ${src})"
+  # BUILD is the resolve layer's cache key; the variant name re-resolves the
+  # plugin set once per commit.
+  docker build --build-arg "BASE=${src}" --build-arg "BUILD=${name}" -t "$image" .
+
+  local verified=skipped
+  if [[ $verify == 1 ]]; then
+    echo "==> Verifying ${image}"
+    if ! BASE="$src" tests/verify-image.sh "$image" plugins.list; then
+      docker rmi "$image" >/dev/null
+      die "verification failed; removed ${image} so it cannot be deployed. Rebuild with --no-verify to override."
+    fi
+    verified=true
+  fi
+
+  echo "==> Labelling ${image}"
+  local plugins
+  plugins=$(curated_versions "$image")
+  printf 'FROM %s\n' "$image" | docker build -q \
+    --label "org.opencontainers.image.revision=${revision}" \
+    --label "fi.halos.variant.name=${name}" \
+    --label "fi.halos.variant.branch=${branch}" \
+    --label "fi.halos.variant.verified=${verified}" \
+    --label "fi.halos.variant.plugins=${plugins}" \
+    -t "$image" - >/dev/null
+
+  echo ""
+  echo "Built ${image} (verified: ${verified}). Deploy with:"
+  echo "  ./variant deploy <host> ${name}"
+}
+
+################################################################################
+# Device Commands
+
+function deploy {
+  #@ Run a built variant on a device: deploy <host> <variant>
+  #@ Category: Device
+  local host="${1:-}" name="${2:-}"
+  require_host "$host"
+  [[ -n "$name" ]] || die "usage: ./variant deploy <host> <variant>"
+  local image="${REPO}:${name}" id
+  id=$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null) || die "no local image ${image}; build it first"
+
+  echo "==> Checking ${host}"
+  local state
+  state=$(on_host "$host" "$image" "$id" <<'REMOTE'
+image="$1"; id="$2"
+if [ "$(docker inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null || true)" = "$id" ] \
+    && [ "$(compose_image)" = "$image" ]; then
+  echo running
+elif [ "$(docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)" = "$id" ]; then
+  echo present
+else
+  echo absent
+fi
+REMOTE
+)
+  case "$state" in
+    running)
+      echo "${host} is already running ${image}."
+      return 0
+      ;;
+    present)
+      echo "  ${image} already loaded on ${host}; skipping transfer"
+      ;;
+    absent)
+      echo "==> Transferring ${image} to ${host}"
+      docker save "$image" | gzip -1 | ssh "$host" \
+        "bash -c 'if docker info >/dev/null 2>&1; then gunzip | docker load; else gunzip | sudo docker load; fi'"
+      ;;
+    *)
+      die "unexpected preflight answer from ${host}: ${state}"
+      ;;
+  esac
+
+  echo "==> Switching ${host} to ${image}"
+  on_host "$host" "$image" "$id" <<'REMOTE'
+switch_to "$1" "$2"
+REMOTE
+  echo ""
+  echo "${host} is running ${image}."
+}
+
+function revert {
+  #@ Put a device back on the stock image: revert <host>
+  #@ Category: Device
+  local host="${1:-}"
+  require_host "$host"
+  on_host "$host" <<'REMOTE'
+current=$(compose_image)
+if ! is_variant "$current"; then
+  echo "Already on stock ($current); nothing to revert."
+  exit 0
+fi
+if [ ! -s "$STATE/stock-image" ]; then
+  echo "No saved stock image in $STATE/stock-image; cannot revert." >&2
+  echo "Reinstalling marine-signalk-server-container restores the stock compose file." >&2
+  exit 1
+fi
+stock=$(cat "$STATE/stock-image")
+echo "==> Switching to $stock"
+switch_to "$stock" "$(docker image inspect -f '{{.Id}}' "$stock" 2>/dev/null || true)"
+REMOTE
+}
+
+function status {
+  #@ Show which image a device runs and what variants it holds: status <host>
+  #@ Category: Device
+  local host="${1:-}"
+  require_host "$host"
+  on_host "$host" <<'REMOTE'
+current=$(compose_image)
+running=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || echo "(not running)")
+label() { docker image inspect -f "{{index .Config.Labels \"$1\"}}" "$current" 2>/dev/null || true; }
+echo "Compose image:  $current"
+echo "Running image:  $running"
+if is_variant "$current"; then
+  echo "Mode:           variant"
+  echo "  branch:       $(label fi.halos.variant.branch)"
+  echo "  commit:       $(label org.opencontainers.image.revision)"
+  echo "  verified:     $(label fi.halos.variant.verified)"
+  echo "  plugins:      $(label fi.halos.variant.plugins)"
+  echo "  stock:        $(cat "$STATE/stock-image" 2>/dev/null || echo '(not recorded)')"
+else
+  echo "Mode:           stock"
+fi
+echo ""
+echo "Loaded variants:"
+docker image ls "$VARIANT_REPO" --format '  {{.Tag}}  {{.CreatedSince}}  {{.Size}}'
+echo ""
+echo "Config snapshots ($SNAPSHOTS):"
+ls -1t "$SNAPSHOTS" 2>/dev/null | sed 's/^/  /' || true
+REMOTE
+}
+
+function restore-config {
+  #@ Restore a config snapshot on a device: restore-config <host> [snapshot]
+  #@ Category: Device
+  local host="${1:-}" snap="${2:-}"
+  require_host "$host"
+  if [[ -z "$snap" ]]; then
+    echo "Snapshots on ${host}, newest first. Pass one as the second argument."
+    on_host "$host" <<'REMOTE'
+ls -1t "$SNAPSHOTS" 2>/dev/null | sed 's/^/  /' || true
+REMOTE
+    return 0
+  fi
+  [[ "$snap" != */* ]] || die "pass the snapshot file name, not a path"
+  on_host "$host" "$snap" <<'REMOTE'
+archive="$SNAPSHOTS/$1"
+[ -f "$archive" ] || { echo "No snapshot $archive." >&2; exit 1; }
+snapshot "pre-restore"
+sudo systemctl stop "$UNIT"
+# Overlays the snapshot: files created since it was taken stay in place.
+sudo tar -xzf "$archive" -C "$DATA"
+sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
+sudo systemctl start "$UNIT"
+if ! wait_ready; then
+  echo "FAIL: Signal K did not answer $READY_URL after restoring $1." >&2
+  exit 1
+fi
+echo "  OK: restored $1"
+REMOTE
+}
+
+function prune {
+  #@ Remove variant images a device is not using: prune <host>
+  #@ Category: Device
+  local host="${1:-}"
+  require_host "$host"
+  on_host "$host" <<'REMOTE'
+current=$(compose_image)
+running=$(docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || true)
+removed=0
+for img in $(docker image ls "$VARIANT_REPO" --format '{{.Repository}}:{{.Tag}}'); do
+  [ "$img" = "$current" ] && continue
+  [ "$img" = "$running" ] && continue
+  docker rmi "$img" >/dev/null
+  echo "  removed $img"
+  removed=$((removed + 1))
+done
+echo "Removed $removed variant image(s)."
+REMOTE
+}
+
+################################################################################
+# Core Commands
+
+function help {
+  #@ Show this help message
+  #@ Category: Core
+  echo "Signal K Server Variant Images - Development Commands"
+  echo "====================================================="
+  echo ""
+  echo "Available commands:"
+  echo ""
+
+  # Extract function definitions and their help comments
+  awk '/^function / {
+    fname = $2
+    sub(/[({].*/, "", fname)
+    getline
+    if ($0 ~ /#@/) {
+      desc = $0
+      sub(/.*#@ /, "", desc)
+      sub(/ *$/, "", desc)
+      getline
+      if ($0 ~ /#@ Category:/) {
+        cat = $0
+        sub(/.*Category: /, "", cat)
+        sub(/ *$/, "", cat)
+        if (!seen[cat]++) categories[++cat_count] = cat
+        commands[cat, ++cmd_count[cat]] = fname
+        descriptions[cat, cmd_count[cat]] = desc
+      }
+    }
+  }
+  END {
+    for (i = 1; i <= cat_count; i++) {
+      cat = categories[i]
+      print "\n" cat ":"
+      for (j = 1; j <= cmd_count[cat]; j++) {
+        printf "  %-25s %s\n", commands[cat, j], descriptions[cat, j]
+      }
+    }
+  }' "$0"
+
+  echo ""
+  echo "Usage: ./variant <command> [arguments...]"
+  echo ""
+}
+
+################################################################################
+# Commands end.
+
+TIMEFORMAT=$'\nTask completed in %3lR'
+time "${@:-help}"
