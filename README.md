@@ -49,6 +49,23 @@ ordinary check, and auto-merge lands it once that check is green — no human is
 in this path. The decision about whether an upstream release should reach a
 device is made later, at the repin in `halos-marine-containers`.
 
+## Variant images
+
+`./variant` builds an image from a local checkout of a signalk-server fork
+branch — for example one carrying unmerged PRs — with the same curated plugin
+set, and runs it on a HaLOS device in place of the stock image. Development
+use only; CI neither builds nor publishes variants.
+
+```bash
+./variant build ../signalk-server        # -> localhost/signalk-server:<branch>-<sha>
+./variant deploy my-boat.local <variant> # copy over ssh, snapshot config, switch
+./variant status my-boat.local
+./variant revert my-boat.local           # back to the stock image
+```
+
+A package upgrade of the marine Signal K app puts the device back on stock
+without asking; `status` shows which image is running. See AGENTS.md.
+
 ## Development notes
 
 See [AGENTS.md](AGENTS.md) — in particular why the Dockerfile resolves the manifest in
