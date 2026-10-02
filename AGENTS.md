@@ -348,8 +348,8 @@ from stock, and while the compose file names a `localhost/signalk-server:` image
 upgrade can have happened since.
 
 Every switch first writes a config snapshot to `~/signalk-variants/snapshots/`. It
-leaves out plugin code (`node_modules`, `system-plugins`), `appstore-cache` and the
-DuckDB history store; on a device that has been running, those are the bulk of the
+leaves out plugin code (`node_modules`, `system-plugins`), `appstore-cache`, downloaded
+`charts` and the DuckDB history store; on a device that has been running, those are the bulk of the
 data directory. `restore-config` extracts a snapshot over the data directory, so
 files created after the snapshot stay.
 

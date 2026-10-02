@@ -102,15 +102,24 @@ is_variant() { case "$1" in "$VARIANT_REPO":*) return 0 ;; *) return 1 ;; esac; 
 short_name() { if is_variant "$1"; then echo "${1#"$VARIANT_REPO":}"; else echo stock; fi; }
 
 # Config and small plugin state (resources-provider keeps routes there). Left
-# out: plugin code (node_modules, system-plugins), caches, and the DuckDB
-# history store, which is hundreds of MB on a device that has been running.
+# out: plugin code (node_modules, system-plugins), caches, downloaded charts
+# (gigabytes once a chart set is installed), and the DuckDB history store,
+# which is hundreds of MB on a device that has been running.
 snapshot() {
-  local archive
+  local archive status=0
   mkdir -p "$SNAPSHOTS"
   archive="$SNAPSHOTS/config-$(date +%Y%m%d-%H%M%S)_$1.tar.gz"
-  sudo tar -czf "$archive" -C "$DATA" \
+  # The server keeps running while this reads its files, so one can change
+  # mid-read; GNU tar reports that with exit status 1 and still writes the
+  # archive. Only a status above 1 is a failed snapshot.
+  sudo tar -czf "$archive" -C "$DATA" --warning=no-file-changed \
     --exclude=./node_modules --exclude=./system-plugins --exclude=./appstore-cache \
-    --exclude=./plugin-config-data/signalk-duckdb-history-provider .
+    --exclude=./charts \
+    --exclude=./plugin-config-data/signalk-duckdb-history-provider . || status=$?
+  if [ "$status" -gt 1 ]; then
+    echo "Config snapshot failed (tar exit $status)." >&2
+    exit "$status"
+  fi
   sudo chown "$(id -u):$(id -g)" "$archive"
   echo "  config snapshot: $archive ($(du -h "$archive" | cut -f1))"
 }
