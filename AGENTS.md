@@ -305,6 +305,54 @@ Do not add packages that signalk-server already ships as non-optional dependenci
 it makes a vacuous assertion, and installing it risks overwriting the version the
 server was built against.
 
+## Variant images
+
+`./variant` builds an image from a local signalk-server checkout and runs it on a
+device in place of the stock image. It is dev tooling: nothing in CI calls it.
+
+It is a separate script because `run` is in `build.yml`'s push paths filter. A
+merge touching `run` resolves the already-published tag and fails the publish
+guard unless `BUILD` is bumped, which would republish a stock image to ship
+tooling. The same reasoning keeps `check-base-update.sh` out of `run`.
+
+**Build** (`./variant build <checkout> [--no-verify]`) follows the tarball steps of
+upstream's `.github/workflows/build-docker.yml`, packing into a temp directory
+rather than the checkout root: a checkout accumulates gitignored `*.tgz` files, and
+`docker/Dockerfile` copies every one and expects a single `signalk-server-<ver>.tgz`.
+It builds `EDITION=core` on `cr.signalk.io` base `24.04-24.x`, which is what
+upstream's release workflow passes for the published `-core`; the Dockerfile's
+own default is the Node 22 base. That image, `localhost/signalk-server-src:<name>`,
+becomes `BASE` for this repo's Dockerfile, giving `localhost/signalk-server:<name>`.
+
+The from-source image installs the server with `--install-strategy=nested`, so its
+whole dependency closure sits under `signalk-server/node_modules`, where the
+published `-core` hoists it. The collision guard still passes because
+`plugins.list` carries no non-optional server dependency, and `verify-image.sh`
+compares against `BASE`, so it follows whichever layout the base has.
+
+The build refuses a dirty checkout, because the name (`<branch-slug>-<short-sha>`) and
+the labels claim a commit. A failed verification removes the image tag so it cannot
+be deployed; `--no-verify` is the override. Labels: `org.opencontainers.image.revision`,
+`fi.halos.variant.{name,branch,verified,plugins}`.
+
+**Device.** `deploy` copies the image with `docker save | ssh docker load` (skipped
+when the device already holds that image ID), rewrites the `image:` line of
+`/var/lib/container-apps/marine-signalk-server-container/docker-compose.yml`,
+restarts the systemd unit, waits for `:3000/signalk`, and fails unless the running
+container's image ID is the one requested.
+
+That compose file is not a dpkg conffile, so a package upgrade overwrites the edit
+without a prompt and the device is back on stock. `revert` depends on this: the stock
+`image:` value is saved to `~/signalk-variants/stock-image` only when switching away
+from stock, and while the compose file names a `localhost/signalk-server:` image no
+upgrade can have happened since.
+
+Every switch first writes a config snapshot to `~/signalk-variants/snapshots/`. It
+leaves out plugin code (`node_modules`, `system-plugins`), `appstore-cache`, downloaded
+`charts` and the DuckDB history store; on a device that has been running, those are the bulk of the
+data directory. `restore-config` extracts a snapshot over the data directory, so
+files created after the snapshot stay.
+
 ## Architecture
 
 arm64 only. HaLOS is an arm64 Raspberry Pi OS distribution and the marine app is this
