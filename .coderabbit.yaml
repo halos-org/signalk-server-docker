@@ -1,0 +1,110 @@
+# yaml-language-server: $schema=https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+language: en-US
+
+# Under 250 characters, the schema's limit.
+tone_instructions: >-
+  Name the trigger, the code path, and the consequence for a device or a
+  published image for every finding. If you cannot name one, do not raise it.
+  No praise, no preamble, no restating the diff.
+
+reviews:
+  profile: assertive
+  poem: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  high_level_summary_instructions: |
+    Write in present tense. Lead with what changes in the published image or
+    on a device, not with the file list. Do not restate the PR description.
+
+  pre_merge_checks:
+    # Quoted: bare `off` is a YAML 1.1 boolean, and this field takes a string.
+    docstrings:
+      mode: "off"
+    description:
+      mode: "off"
+
+  tools:
+    # Nothing in CI runs shellcheck; lefthook does, but only where installed.
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        ## Project rules
+        AGENTS.md records why the Dockerfile, the verification harness, the
+        versioning scheme and the upstream watcher are the way they are, with
+        measurements. Flag a change that contradicts one of those records
+        without new evidence, and a change to behaviour that leaves the
+        corresponding AGENTS.md section describing the old behaviour.
+
+        ## Comments
+        A comment explains why the code is the way it is, never what changed.
+        Flag comments that narrate the change or restate the code.
+
+        ## Privacy
+        This repository is public. Flag any hostname, domain, IP address or
+        account name of a real device or network. Examples use
+        `my-boat.local`.
+
+        ## Do not ask for these
+        - A VERSION file, a CHANGELOG or a semver bump. The only version is
+          `BUILD` in build.env, and it changes only when the image content
+          changes.
+        - Pinning plugin versions in plugins.list. Resolution is unpinned on
+          purpose, matching upstream.
+        - amd64 support.
+
+    - path: "Dockerfile"
+      instructions: |
+        Plugins must land in the signalk-server package root's node_modules,
+        installed with `--install-strategy=nested` and `--ignore-scripts`, and
+        copied whole-directory per manifest entry, refusing on collision.
+        Flag anything that hoists, installs in place, merges into an existing
+        package directory, or leaves bytes in a final-stage layer that a later
+        step deletes.
+
+    - path: "{build.env,plugins.list,.github/workflows/build.yml}"
+      instructions: |
+        A change here puts the merge on the publish path, and published tags
+        are never reused. Flag a change to image content (BASE, the manifest,
+        the Dockerfile) that does not increment BUILD, and a BASE change that
+        does not reset BUILD to 1.
+
+    - path: "tests/**"
+      instructions: |
+        Verification is behavioural: the harness asks the running server what
+        it loaded. Flag an assertion that inspects files on disk in place of
+        the running server, and a new or changed assertion without a matching
+        row in the mutation table in tests/README.md.
+
+    - path: "variant"
+      instructions: |
+        Development tooling that edits a HaLOS device over ssh. The device
+        login shell is fish, so remote steps must go through `bash -s` on
+        stdin. Restarts go through the systemd unit, never `docker restart`.
+        Flag a device step that can leave the compose file naming an image
+        the device does not have, and a success message printed without
+        checking what the device is actually running.
+
+    - path: ".github/scripts/**"
+      instructions: |
+        The upstream watcher must fail rather than report no update whenever
+        it has not read the whole narrowed tag listing. Flag any path that
+        can exit 0 without having done so.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - AGENTS.md
