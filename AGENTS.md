@@ -347,7 +347,8 @@ without a prompt and the device is back on stock. `revert` depends on this: the 
 from stock, and while the compose file names a `localhost/signalk-server:` image no
 upgrade can have happened since.
 
-Every switch first writes a config snapshot to `~/signalk-variants/snapshots/`. It
+Every switch first stops the unit and writes a config snapshot to
+`~/signalk-variants/snapshots/`, so no file changes while tar reads it. It
 leaves out plugin code (`node_modules`, `system-plugins`), `appstore-cache`, downloaded
 `charts` and the DuckDB history store; on a device that has been running, those are the bulk of the
 data directory. `restore-config` extracts a snapshot over the data directory, so

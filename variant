@@ -105,19 +105,22 @@ short_name() { if is_variant "$1"; then echo "${1#"$VARIANT_REPO":}"; else echo 
 # out: plugin code (node_modules, system-plugins), caches, downloaded charts
 # (gigabytes once a chart set is installed), and the DuckDB history store,
 # which is hundreds of MB on a device that has been running.
+#
+# Stops $UNIT first so no file changes mid-read, and leaves it stopped for the
+# caller to start; on failure it starts the unit again.
 snapshot() {
   local archive status=0
   mkdir -p "$SNAPSHOTS"
   archive="$SNAPSHOTS/config-$(date +%Y%m%d-%H%M%S)_$1.tar.gz"
-  # The server keeps running while this reads its files, so one can change
-  # mid-read; GNU tar reports that with exit status 1 and still writes the
-  # archive. Only a status above 1 is a failed snapshot.
-  sudo tar -czf "$archive" -C "$DATA" --warning=no-file-changed \
+  sudo systemctl stop "$UNIT"
+  sudo tar -czf "$archive" -C "$DATA" \
     --exclude=./node_modules --exclude=./system-plugins --exclude=./appstore-cache \
     --exclude=./charts \
     --exclude=./plugin-config-data/signalk-duckdb-history-provider . || status=$?
-  if [ "$status" -gt 1 ]; then
-    echo "Config snapshot failed (tar exit $status)." >&2
+  if [ "$status" -ne 0 ]; then
+    echo "Config snapshot failed (tar exit $status); starting $UNIT again." >&2
+    sudo rm -f "$archive"
+    sudo systemctl start "$UNIT"
     exit "$status"
   fi
   sudo chown "$(id -u):$(id -g)" "$archive"
@@ -388,7 +391,6 @@ REMOTE
 archive="$SNAPSHOTS/$1"
 [ -f "$archive" ] || { echo "No snapshot $archive." >&2; exit 1; }
 snapshot "pre-restore"
-sudo systemctl stop "$UNIT"
 # Overlays the snapshot: files created since it was taken stay in place.
 sudo tar -xzf "$archive" -C "$DATA"
 sudo systemctl reset-failed "$UNIT" 2>/dev/null || true
