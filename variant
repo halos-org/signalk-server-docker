@@ -194,7 +194,11 @@ function build {
   #@ Category: Build
   local checkout="${1:-}" verify=1
   [[ -n "$checkout" ]] || die "usage: ./variant build <signalk-server checkout> [--no-verify]"
-  [[ "${2:-}" == "--no-verify" ]] && verify=0
+  case "${2:-}" in
+    "") ;;
+    --no-verify) verify=0 ;;
+    *) die "unknown option: $2" ;;
+  esac
   checkout=$(cd "$checkout" && pwd)
   [[ -f "$checkout/docker/Dockerfile" ]] || die "$checkout has no docker/Dockerfile; is it a signalk-server checkout?"
   # The image name and labels claim a commit; uncommitted changes would make them lie.
