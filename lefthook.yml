@@ -5,7 +5,7 @@ pre-commit:
   parallel: true
   commands:
     shellcheck:
-      glob: "*.sh"
+      glob: "{*.sh,variant}"
       run: shellcheck {staged_files}
       fail_text: "shellcheck found issues. Fix the warnings above."
 
